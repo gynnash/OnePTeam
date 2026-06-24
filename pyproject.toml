@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onep"
+version = "0.1.0"
+description = "Multi-Agent Full-Stack Software Development Team"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "crewai>=0.80",
+    "langgraph>=0.2",
+    "langchain>=0.3",
+    "gitpython>=3.1",
+    "pyyaml>=6.0",
+    "docker>=7.0",
+    "litellm>=1.50",
+]
+
+[project.scripts]
+onep = "onep.main:cli"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+]
