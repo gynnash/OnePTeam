@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import yaml
 
-from onep.persistence.models import PipelineState
+from onep.persistence.models import PipelineState, ProjectMode
 
 
 def state_path(workspace: Path) -> Path:
@@ -17,7 +17,7 @@ def load_state(workspace: Path) -> PipelineState:
         return PipelineState()
     raw = yaml.safe_load(sp.read_text()) or {}
     return PipelineState(
-        mode=raw.get("mode", "greenfield"),
+        mode=ProjectMode(raw.get("mode", "greenfield")),
         current_stage=raw.get("current_stage", ""),
         stages_completed=raw.get("stages_completed", []),
         pending_approval=raw.get("pending_approval", False),
@@ -31,7 +31,7 @@ def save_state(workspace: Path, state: PipelineState) -> None:
     sp = state_path(workspace)
     sp.parent.mkdir(parents=True, exist_ok=True)
     sp.write_text(yaml.dump({
-        "mode": state.mode,
+        "mode": state.mode.value,
         "current_stage": state.current_stage,
         "stages_completed": state.stages_completed,
         "pending_approval": state.pending_approval,

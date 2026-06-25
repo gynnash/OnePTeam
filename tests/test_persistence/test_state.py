@@ -1,12 +1,12 @@
 from pathlib import Path
 
 from onep.persistence.state import load_state, save_state
-from onep.persistence.models import PipelineState
+from onep.persistence.models import PipelineState, ProjectMode
 
 
 def test_save_and_load_state(tmp_path: Path):
     state = PipelineState(
-        mode="greenfield",
+        mode=ProjectMode("greenfield"),
         current_stage="architect",
         stages_completed=["pm", "designer"],
         artifacts={"prd": "docs/PRD.md"},
