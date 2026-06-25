@@ -17,7 +17,8 @@ def create_crew(project: Project, state: PipelineState) -> Crew:
     else:
         raise ValueError(f"Unsupported pipeline mode: {project.mode}")
 
-    agents = [get_agent(t.agent.role.lower()) for t in tasks] if False else []
+    # Agents are attached to tasks directly; no separate agents list needed.
+    agents: list = []
 
     return Crew(
         agents=agents,

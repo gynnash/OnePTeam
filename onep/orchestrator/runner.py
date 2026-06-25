@@ -75,7 +75,7 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
             prd_content = prd_path.read_text()
 
         prompt_template = STAGE_PROMPTS[stage_name]
-        requirement = getattr(project, 'requirement', '')
+        requirement = project.requirement
         user_prompt = prompt_template.format(
             requirement=requirement,
             prd_content=prd_content,

@@ -69,8 +69,26 @@ def resume_cmd(project_name: str):
 @click.command()
 @click.argument("project_name", type=str)
 def approve_cmd(project_name: str):
-    """Approve the current approval gate."""
-    console.print(f"[green]Stage approved for '{project_name}'.[/green]")
+    """Approve the current approval gate and resume the pipeline."""
+    init_db()
+    projects = list_projects()
+    project = next((p for p in projects if p.name == project_name), None)
+    if project is None:
+        console.print(f"[red]Project '{project_name}' not found.[/red]")
+        return
+
+    from pathlib import Path
+    from onep.persistence.state import load_state, save_state
+    from onep.persistence.models import ProjectStatus
+
+    state = load_state(Path(project.workspace_path))
+    state.pending_approval = False
+    save_state(Path(project.workspace_path), state)
+
+    project.status = ProjectStatus.RUNNING
+    project.touch()
+    update_project(project)
+    console.print(f"[green]Stage approved for '{project_name}'. Run 'onep run {project_name}' to continue.[/green]")
 
 
 @click.command()
@@ -78,6 +96,24 @@ def approve_cmd(project_name: str):
 @click.argument("reason", type=str, default="")
 def reject_cmd(project_name: str, reason: str):
     """Reject the current stage with optional feedback."""
+    init_db()
+    projects = list_projects()
+    project = next((p for p in projects if p.name == project_name), None)
+    if project is None:
+        console.print(f"[red]Project '{project_name}' not found.[/red]")
+        return
+
+    from pathlib import Path
+    from onep.persistence.state import load_state, save_state
+    from onep.persistence.models import ProjectStatus
+
+    state = load_state(Path(project.workspace_path))
+    state.pending_approval = False
+    save_state(Path(project.workspace_path), state)
+
+    project.status = ProjectStatus.RUNNING
+    project.touch()
+    update_project(project)
     console.print(f"[red]Stage rejected for '{project_name}'.[/red]")
     if reason:
         console.print(f"Feedback: {reason}")

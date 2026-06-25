@@ -49,7 +49,7 @@ def create_cmd(requirement: str, name: str | None):
         mode=ProjectMode.GREENFIELD,
         workspace_path=str(workspace),
     )
-    project.requirement = requirement  # type: ignore[attr-defined]
+    project.requirement = requirement
     insert_project(project)
 
     state = PipelineState()

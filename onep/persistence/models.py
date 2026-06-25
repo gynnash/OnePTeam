@@ -79,6 +79,7 @@ class Project:
     name: str
     mode: ProjectMode
     workspace_path: str
+    requirement: str = ""
     status: ProjectStatus = ProjectStatus.RUNNING
     current_stage: str = ""
     id: str = field(default_factory=lambda: uuid.uuid4().hex)

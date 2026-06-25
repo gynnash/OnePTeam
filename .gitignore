@@ -1,4 +1,5 @@
 .superpowers/
+.onep/
 __pycache__/
 *.pyc
 .env
