@@ -15,7 +15,8 @@ def create_crew(project: Project, state: PipelineState) -> Crew:
         from onep.orchestrator.greenfield import build_greenfield_tasks
         tasks = build_greenfield_tasks(project, state)
     else:
-        raise ValueError(f"Unsupported pipeline mode: {project.mode}")
+        from onep.orchestrator.brownfield import build_brownfield_tasks
+        tasks = build_brownfield_tasks(project, state)
 
     # Agents are attached to tasks directly; no separate agents list needed.
     agents: list = []
