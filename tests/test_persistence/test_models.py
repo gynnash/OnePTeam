@@ -5,6 +5,7 @@ from onep.persistence.models import (
     StageRun,
     StageStatus,
     Approval,
+    Decision,
     PipelineState,
 )
 
@@ -48,13 +49,13 @@ def test_stage_run_fail():
 
 
 def test_approval_creation():
-    a = Approval(stage_run_id="sr-1", decision="approved", feedback="LGTM")
-    assert a.decision == "approved"
+    a = Approval(stage_run_id="sr-1", decision=Decision.APPROVED, feedback="LGTM")
+    assert a.decision == Decision.APPROVED
     assert a.feedback == "LGTM"
 
 
 def test_pipeline_state_defaults():
     ps = PipelineState()
-    assert ps.mode == "greenfield"
+    assert ps.mode == ProjectMode.GREENFIELD
     assert ps.stages_completed == []
     assert ps.pending_approval is False

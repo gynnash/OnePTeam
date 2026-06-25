@@ -5,7 +5,6 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
 
 
 class ProjectMode(str, Enum):
@@ -26,6 +25,11 @@ class StageStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+
+
+class Decision(str, Enum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
 
 
 @dataclass
@@ -63,7 +67,7 @@ class StageRun:
 class Approval:
     """Record of a user approval/rejection."""
     stage_run_id: str
-    decision: str  # 'approved' | 'rejected'
+    decision: Decision
     feedback: str = ""
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -88,7 +92,7 @@ class Project:
 @dataclass
 class PipelineState:
     """Runtime pipeline state mirrored in state.yaml."""
-    mode: str = "greenfield"
+    mode: ProjectMode = ProjectMode.GREENFIELD
     current_stage: str = ""
     stages_completed: list[str] = field(default_factory=list)
     pending_approval: bool = False
