@@ -22,7 +22,31 @@ pip install -e .
 
 ### 配置
 
-首次运行会自动创建配置文件 `~/.onep/config.yaml`，按需填入 API 密钥：
+#### API 密钥（.env 文件，推荐）
+
+在项目根目录创建 `.env` 文件（已加入 `.gitignore`，不会被提交到 Git）：
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env` 填入真实的 API 密钥：
+
+```bash
+# DeepSeek
+DEEPSEEK_API_KEY=sk-your-deepseek-key
+DEEPSEEK_API_BASE=https://api.deepseek.com/v1
+
+# OpenAI
+OPENAI_API_KEY=sk-your-openai-key
+OPENAI_API_BASE=https://api.openai.com/v1
+```
+
+环境变量优先级高于配置文件，推荐使用 `.env` 管理密钥。
+
+#### 模型配置（config.yaml）
+
+首次运行会自动创建 `~/.onep/config.yaml`，模型路由和 Pipeline 参数在此配置：
 
 ```yaml
 llm:
@@ -30,14 +54,14 @@ llm:
   default_provider: deepseek
   complex_model: openai/gpt-5.5
   complex_provider: openai
-  models:
-    deepseek:
-      api_key: "sk-your-key"
-      api_base: https://api.deepseek.com/v1
-    openai:
-      api_key: "sk-your-key"
-      api_base: https://api.openai.com/v1
+  # api_key 和 api_base 推荐通过 .env 环境变量注入，不要写在这里
+
+pipeline:
+  auto_approve: false
+  max_retries: 3
 ```
+
+> **安全提示：** 不要在 `config.yaml` 中写入 API 密钥，也不要把 `.env` 文件提交到 Git。密钥统一通过环境变量管理。
 
 ### 使用
 
