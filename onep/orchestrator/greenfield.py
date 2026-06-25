@@ -53,8 +53,11 @@ PRD 文档：docs/PRD.md 的内容如下：
     "architect": """\
 你是一位系统架构师。请基于 PRD 和 UI 设计设计技术架构。
 
-PRD: docs/PRD.md
-UI 设计: docs/DESIGN.md
+PRD 内容：
+{prd_content}
+
+UI 设计内容：
+{design_content}
 
 项目工作区: {workspace}
 
@@ -72,7 +75,8 @@ UI 设计: docs/DESIGN.md
 你是一位全栈研发工程师。请根据架构设计实现完整的应用代码。
 
 工作区: {workspace}
-架构设计: docs/ARCHITECTURE.md
+架构设计内容:
+{arch_content}
 
 请完成以下工作：
 1. 创建后端项目结构 (backend/)，实现 FastAPI 应用

@@ -1,4 +1,4 @@
-"""Pipeline runner — executes stages sequentially, handles state and checkpoints."""
+"""Pipeline runner — executes stages sequentially, calls LLMs, handles checkpoints."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,9 +7,9 @@ from typing import Optional
 from rich.console import Console
 
 from onep.config import load_config
+from onep.agents.registry import get_agent
 from onep.persistence.database import (
-    init_db, get_project, update_project,
-    insert_stage_run, update_stage_run, list_projects,
+    init_db, update_project, insert_stage_run, update_stage_run, list_projects,
 )
 from onep.persistence.models import (
     Project, PipelineState, StageRun, StageStatus, ProjectStatus,
@@ -47,13 +47,13 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
 
         if stage_name in state.stages_completed:
             continue
-
         if start_from and stage_name != start_from:
             continue
         start_from = None
 
         console.print(f"\n[bold cyan]▶ Stage: {stage_name} ({stage['agent']})[/bold cyan]")
 
+        # ----- stage run tracking -----
         stage_run = StageRun(
             project_id=project.id,
             stage_name=stage_name,
@@ -68,32 +68,45 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
         state.current_stage = stage_name
         save_state(workspace, state)
 
-        # Build prompt
+        # ----- build prompt -----
         prd_content = ""
         prd_path = workspace / "docs" / "PRD.md"
         if prd_path.exists():
             prd_content = prd_path.read_text()
 
-        prompt_template = STAGE_PROMPTS[stage_name]
-        requirement = project.requirement
-        user_prompt = prompt_template.format(
-            requirement=requirement,
+        design_content = ""
+        design_path = workspace / "docs" / "DESIGN.md"
+        if design_path.exists():
+            design_content = design_path.read_text()
+
+        arch_content = ""
+        arch_path = workspace / "docs" / "ARCHITECTURE.md"
+        if arch_path.exists():
+            arch_content = arch_path.read_text()
+
+        user_prompt = STAGE_PROMPTS[stage_name].format(
+            requirement=project.requirement,
             prd_content=prd_content,
+            design_content=design_content,
+            arch_content=arch_content,
             workspace=str(workspace),
         )
 
-        system_prompt = (
-            "你是一个软件开发团队的成员。请按照指令完成当前阶段的工作。"
-            "直接输出结果，保存到指定文件，不需要额外解释。"
-        )
+        system_prompt = _build_agent_system_prompt(stage["agent"])
 
+        # ----- invoke LLM -----
         try:
-            console.print(f"[dim]Agent: {stage['agent']} working...[/dim]")
-            console.print(f"[dim]Prompt length: {len(user_prompt)} chars[/dim]")
-            # In MVP, we simulate the agent's work by displaying the prompt
-            # Real LLM invocation: from onep.llm.adapters import get_llm; get_llm().invoke(...)
-            console.print("[yellow]LLM invocation skipped (MVP — requires API keys).[/yellow]")
-            console.print(f"[dim]Agent would process: {stage['description']}[/dim]")
+            console.print(f"[dim]Agent {stage['agent']} working...[/dim]")
+            response = _invoke_agent(stage["agent"], system_prompt, user_prompt)
+
+            if response is None:
+                console.print(
+                    "[yellow]LLM 不可用（请配置 API 密钥），Stage 跳过。"
+                    "Agent 会输出到聊天窗口，由用户手动执行。[/yellow]"
+                )
+            else:
+                console.print(f"[dim]Response received ({len(response)} chars)[/dim]")
+                _save_agent_output(workspace, response, stage_name)
 
         except Exception as e:
             console.print(f"[red]Stage failed: {e}[/red]")
@@ -104,6 +117,13 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
             update_project(project)
             return False
 
+        # ----- run subflows if applicable -----
+        if stage_name == "developer":
+            _run_code_review(workspace)
+        elif stage_name == "tester":
+            _run_test_retry(workspace)
+
+        # ----- commit -----
         stage_run.complete(output_files=_detect_output_files(workspace, stage_name))
         update_stage_run(stage_run)
 
@@ -115,6 +135,7 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
         state.current_stage = ""
         save_state(workspace, state)
 
+        # ----- approval gate -----
         if stage_name in approval_required_stages and not config.pipeline.auto_approve:
             state.pending_approval = True
             save_state(workspace, state)
@@ -131,20 +152,101 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
     project.status = ProjectStatus.COMPLETED
     project.touch()
     update_project(project)
-
     console.print(f"\n[bold green]🎉 Project '{project_name}' completed successfully![/bold green]")
     return True
+
+
+def _build_agent_system_prompt(agent_name: str) -> str:
+    """Build a system prompt from an agent's registered role, goal, and backstory."""
+    agent = get_agent(agent_name)
+    return (
+        f"{agent.role}\n\n"
+        f"目标: {agent.goal}\n\n"
+        f"背景: {agent.backstory}\n\n"
+        f"请按照指令完成当前阶段的工作。直接输出结果，保存到指定文件，不需要额外解释。"
+    )
+
+
+def _invoke_agent(agent_name: str, system_prompt: str, user_prompt: str) -> str | None:
+    """Invoke LLM via the adapter. Returns None if unavailable."""
+    try:
+        from onep.llm.adapters import get_llm
+        return get_llm().invoke(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            stage_name=agent_name,
+        )
+    except Exception as e:
+        console.print(f"[yellow]LLM 调用失败: {e}[/yellow]")
+        return None
+
+
+def _save_agent_output(workspace: Path, response: str, stage_name: str) -> None:
+    """Extract file blocks from agent response and write them to workspace.
+
+    Supports ```file:path ... ``` and ```path ... ``` blocks.
+    """
+    import re
+
+    saved = 0
+    # Pattern: ```optional-label:path\n content ```
+    for match in re.finditer(r'```(?:[\w-]+:)?([\w./-]+)\n(.*?)```', response, re.DOTALL):
+        filepath = match.group(1).strip()
+        content = match.group(2).strip()
+        full_path = workspace / filepath
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_text(content)
+        saved += 1
+
+    if saved == 0:
+        # No file blocks found; save raw response as stage output
+        output_file = workspace / "docs" / f"STAGE_{stage_name.upper()}_OUTPUT.md"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_text(response)
+        console.print(f"[dim]Raw output saved to {output_file}[/dim]")
+    else:
+        console.print(f"[dim]{saved} file(s) saved from agent response[/dim]")
+
+
+def _run_code_review(workspace: Path) -> None:
+    """Run LangGraph code review subflow after developer stage."""
+    try:
+        from onep.subflows.code_review import run_code_review
+        console.print("[dim]Running code review subflow...[/dim]")
+        result = run_code_review(workspace)
+        if result["status"] == "passed":
+            console.print("[green]Code review: passed[/green]")
+        else:
+            console.print(f"[yellow]Code review: {result['status']} (iteration {result['iteration']})[/yellow]")
+    except Exception as e:
+        console.print(f"[dim]Code review skipped: {e}[/dim]")
+
+
+def _run_test_retry(workspace: Path) -> None:
+    """Run LangGraph test retry subflow after tester stage."""
+    try:
+        from onep.subflows.test_retry import run_test_loop
+        console.print("[dim]Running test retry subflow...[/dim]")
+        result = run_test_loop(workspace, test_command="pytest tests/ -v --tb=short")
+        if result["passed"]:
+            console.print("[green]Tests: all passing[/green]")
+        else:
+            console.print(f"[yellow]Tests: {result['status']} (iteration {result['iteration']})[/yellow]")
+            console.print(f"[dim]{result['test_output'][:500]}[/dim]")
+    except Exception as e:
+        console.print(f"[dim]Test retry skipped: {e}[/dim]")
 
 
 def _detect_output_files(workspace: Path, stage_name: str) -> list[str]:
     """Detect which files were created/modified by a stage."""
     stage_outputs = {
-        "pm": ["docs/PRD.md"],
-        "designer": ["docs/DESIGN.md"],
-        "architect": ["docs/ARCHITECTURE.md"],
-        "developer": ["backend/", "frontend/", "docker-compose.yml", "Dockerfile"],
-        "tester": ["docs/TEST_REPORT.md"],
-        "devops": ["docs/DEPLOY_LOG.md"],
+        "pm": ["docs/PRD.md", "docs/STAGE_PM_OUTPUT.md"],
+        "designer": ["docs/DESIGN.md", "docs/STAGE_DESIGNER_OUTPUT.md"],
+        "architect": ["docs/ARCHITECTURE.md", "docs/STAGE_ARCHITECT_OUTPUT.md"],
+        "developer": ["backend/", "frontend/", "docker-compose.yml", "Dockerfile",
+                       "docs/STAGE_DEVELOPER_OUTPUT.md"],
+        "tester": ["docs/TEST_REPORT.md", "docs/STAGE_TESTER_OUTPUT.md"],
+        "devops": ["docs/DEPLOY_LOG.md", "docs/STAGE_DEVOPS_OUTPUT.md"],
     }
     expected = stage_outputs.get(stage_name, [])
     return [p for p in expected if (workspace / p).exists()]
@@ -152,5 +254,10 @@ def _detect_output_files(workspace: Path, stage_name: str) -> list[str]:
 
 def _has_uncommitted_changes(git: GitTool) -> bool:
     """Check if workspace has uncommitted changes."""
-    status = git.status()
-    return "nothing to commit" not in status and "nothing added to commit" not in status
+    try:
+        import git as gitpython
+        repo = gitpython.Repo(str(git.workspace))
+        return repo.is_dirty(untracked_files=True)
+    except Exception:
+        status = git.status()
+        return "nothing to commit" not in status and "nothing added to commit" not in status

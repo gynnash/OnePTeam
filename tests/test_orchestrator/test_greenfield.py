@@ -16,9 +16,17 @@ def test_all_stages_have_prompts():
         assert stage["name"] in STAGE_PROMPTS, f"Missing prompt for {stage['name']}"
 
 
-def test_prompts_contain_workspace_placeholder():
-    for name, prompt in STAGE_PROMPTS.items():
-        if name == "pm":
-            assert "{requirement}" in prompt
-        else:
-            assert "{workspace}" in prompt or "{prd_content}" in prompt
+def test_prompts_contain_expected_placeholders():
+    """Each prompt must contain the placeholders the runner provides."""
+    expected = {
+        "pm": ["{requirement}"],
+        "designer": ["{prd_content}"],
+        "architect": ["{prd_content}", "{design_content}", "{workspace}"],
+        "developer": ["{arch_content}", "{workspace}"],
+        "tester": ["{workspace}"],
+        "devops": ["{workspace}"],
+    }
+    for name, placeholders in expected.items():
+        prompt = STAGE_PROMPTS[name]
+        for ph in placeholders:
+            assert ph in prompt, f"Stage '{name}' missing placeholder '{ph}'"
