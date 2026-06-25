@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from onep.strategy.models import StrategyItem
+from onep.strategy.persistence import save_plan
 
 
 STANDARD_PLAN_TEMPLATE = """# 优化 Plan: {title}
@@ -100,9 +101,8 @@ def generate_standard_plan(
         system_prompt="你是一位策略架构师。请按照用户要求的格式输出完整的优化Plan。",
         user_prompt=prompt, stage_name="strategy_architect",
     )
-    from onep.strategy.persistence import save_plan
     plan_id = f"{plan_index:03d}-{item.title.replace(' ', '-').replace('/', '-')[:50]}"
-    plan_path = save_plan(workspace / ".onep", plan_id, response)
+    plan_path = save_plan(workspace, plan_id, response)
     item.draft_plan(plan_path)
     return plan_path
 
@@ -118,9 +118,8 @@ def generate_full_plan(
         user_prompt=prompt, stage_name="strategy_architect",
     )
     full_content = standard_plan_content + "\n" + response
-    from onep.strategy.persistence import save_plan
     plan_id = item.plan_path.split("/")[-1].replace(".md", "") if item.plan_path else "full-plan"
-    plan_path = save_plan(workspace / ".onep", plan_id + "-full", full_content)
+    plan_path = save_plan(workspace, plan_id + "-full", full_content)
     item.expand_plan()
     item.plan_path = plan_path
     return plan_path

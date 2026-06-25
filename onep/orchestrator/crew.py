@@ -12,14 +12,13 @@ from onep.persistence.models import Project, PipelineState
 def create_crew(project: Project, state: PipelineState) -> Crew:
     """Build a Crew based on project mode."""
     if project.mode.value == "greenfield":
-        from onep.orchestrator.greenfield import build_greenfield_tasks
+        from onep.orchestrator.greenfield import build_greenfield_tasks, GREENFIELD_STAGES
         tasks = build_greenfield_tasks(project, state)
+        agents = [get_agent(s["agent"]) for s in GREENFIELD_STAGES]
     else:
-        from onep.orchestrator.brownfield import build_brownfield_tasks
+        from onep.orchestrator.brownfield import build_brownfield_tasks, BROWNFIELD_STAGES
         tasks = build_brownfield_tasks(project, state)
-
-    # Agents are attached to tasks directly; no separate agents list needed.
-    agents: list = []
+        agents = [get_agent(s["agent"]) for s in BROWNFIELD_STAGES]
 
     return Crew(
         agents=agents,
