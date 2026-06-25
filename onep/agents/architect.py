@@ -1,0 +1,22 @@
+"""Architect Agent - designs system architecture, data models, and API contracts."""
+from crewai import Agent
+
+from onep.agents.registry import register
+
+
+@register("architect")
+def create_architect() -> Agent:
+    return Agent(
+        role="架构师",
+        goal="基于 PRD 和 UI 设计稿，设计系统架构、数据模型、API 契约和技术选型",
+        backstory=(
+            "你是一位经验丰富的系统架构师，专注于全栈应用架构设计。"
+            "你精通 Python 后端（FastAPI）、React 前端和 React Native 移动端架构。"
+            "你设计 RESTful API、数据库 Schema (SQL/NoSQL)、组件树和中间件策略。"
+            "你输出结构化的 ARCHITECTURE.md、Mermaid 架构图和 API 文档。"
+            "你始终考虑可扩展性、安全性和性能。"
+        ),
+        verbose=True,
+        allow_delegation=False,
+        max_iter=5,
+    )
