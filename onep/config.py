@@ -1,4 +1,4 @@
-"""Global configuration loaded from ~/.onep/config.yaml."""
+"""Global configuration loaded from ~/.onep/config.yaml and environment variables."""
 from __future__ import annotations
 
 import dataclasses
@@ -7,6 +7,15 @@ from pathlib import Path
 from dataclasses import dataclass, field
 
 import yaml
+
+# Load .env file from project root if present
+_ENV_PATH = Path.cwd() / ".env"
+if _ENV_PATH.exists():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(_ENV_PATH)
+    except ImportError:
+        pass
 
 
 @dataclass
