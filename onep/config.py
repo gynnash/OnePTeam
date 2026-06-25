@@ -1,36 +1,12 @@
 """Global configuration loaded from ~/.onep/config.yaml."""
 from __future__ import annotations
 
+import dataclasses
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
 
 import yaml
-
-
-DEFAULT_CONFIG_YAML = """\
-# OnePTeam configuration
-llm:
-  default_model: deepseek/deepseek-chat
-  default_provider: deepseek
-  complex_model: openai/gpt-5.5
-  complex_provider: openai
-  models:
-    deepseek:
-      api_key: ""
-      api_base: https://api.deepseek.com/v1
-    openai:
-      api_key: ""
-      api_base: https://api.openai.com/v1
-
-project:
-  root_dir: ~/.onep
-
-pipeline:
-  auto_approve: false
-  max_retries: 3
-  test_timeout: 300
-"""
 
 
 @dataclass
@@ -61,6 +37,16 @@ class Config:
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
 
 
+def _default_config_yaml() -> str:
+    """Generate the default config YAML from dataclass defaults."""
+    return "# OnePTeam configuration\n" + yaml.dump(
+        dataclasses.asdict(Config()), default_flow_style=False
+    )
+
+
+DEFAULT_CONFIG_YAML = _default_config_yaml()
+
+
 def _config_dir() -> Path:
     return Path(os.path.expanduser("~/.onep"))
 
@@ -81,26 +67,9 @@ def load_config() -> Config:
     """Load config from ~/.onep/config.yaml, creating default if absent."""
     _ensure_config()
     raw = yaml.safe_load(_config_path().read_text()) or {}
-
-    llm_raw = raw.get("llm", {})
-    llm = LLMConfig(
-        default_model=llm_raw.get("default_model", "deepseek/deepseek-chat"),
-        default_provider=llm_raw.get("default_provider", "deepseek"),
-        complex_model=llm_raw.get("complex_model", "openai/gpt-5.5"),
-        complex_provider=llm_raw.get("complex_provider", "openai"),
-        models=llm_raw.get("models", {}),
-    )
-
-    project_raw = raw.get("project", {})
-    project = ProjectConfig(root_dir=project_raw.get("root_dir", "~/.onep"))
-
-    pipeline_raw = raw.get("pipeline", {})
-    pipeline = PipelineConfig(
-        auto_approve=pipeline_raw.get("auto_approve", False),
-        max_retries=pipeline_raw.get("max_retries", 3),
-        test_timeout=pipeline_raw.get("test_timeout", 300),
-    )
-
+    llm = LLMConfig(**(raw.get("llm") or {}))
+    project = ProjectConfig(**(raw.get("project") or {}))
+    pipeline = PipelineConfig(**(raw.get("pipeline") or {}))
     return Config(llm=llm, project=project, pipeline=pipeline)
 
 
