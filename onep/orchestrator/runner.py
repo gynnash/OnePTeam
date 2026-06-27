@@ -15,6 +15,7 @@ from onep.persistence.models import (
     Project, PipelineState, StageRun, StageStatus, ProjectStatus,
 )
 from onep.persistence.state import load_state, save_state
+from onep.memory import hooks as memory_hooks
 from onep.tools.git import GitTool
 from onep.orchestrator.greenfield import GREENFIELD_STAGES, STAGE_PROMPTS
 
@@ -130,6 +131,12 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
         if _has_uncommitted_changes(git):
             git.run(operation="add", paths=".")
             git.run(operation="commit", message=f"feat: {stage_name} stage completed — {stage['description']}")
+
+            memory_hooks.on_stage_complete(
+                project.name,
+                stage_name,
+                stage["description"],
+            )
 
         state.stages_completed.append(stage_name)
         state.current_stage = ""

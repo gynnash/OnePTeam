@@ -20,6 +20,7 @@ from onep.strategy.models import WorkbenchState
 from onep.strategy.scanner import walk_files, batch_files, parse_scan_response, get_strategy_files
 from onep.strategy.analyzer import parse_analysis_response
 from onep.strategy.persistence import save_workbench
+from onep.memory import hooks as memory_hooks
 from onep.strategy.workbench import run_dialogue_loop
 from onep.agents.registry import get_agent
 from onep.orchestrator.brownfield import SCAN_PROMPT, ANALYZE_PROMPT
@@ -159,6 +160,12 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str) ->
         ]
 
     console.print(f"分析完成: 发现 {len(items)} 个优化方向")
+
+    memory_hooks.on_analysis_complete(
+        project_name,
+        len(items),
+        "\n".join(f"- {i.title}: {i.summary[:100]}" for i in items[:10]),
+    )
 
     # ------- Display & Save -------
     wb = WorkbenchState(

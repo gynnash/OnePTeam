@@ -11,6 +11,7 @@ from onep.strategy.models import (
     WorkbenchState, StrategyItem, DialogueTurn, ItemStatus, PlanVersion,
 )
 from onep.strategy.persistence import save_workbench, append_dialogue
+from onep.memory import hooks as memory_hooks
 from onep.strategy.planner import generate_standard_plan, generate_full_plan
 
 console = Console()
@@ -112,6 +113,11 @@ def handle_slash_command(
     elif cmd == "exit":
         save_workbench(workspace, wb)
         console.print(f"[green]工作台已保存。恢复会话: onep strategy resume {wb.project_name}[/green]")
+        memory_hooks.on_dialogue_exit(
+            wb.project_name,
+            len([i for i in wb.items if i.status != ItemStatus.DISCARDED]),
+            _build_dialogue_summary(wb),
+        )
     return wb
 
 
@@ -228,6 +234,8 @@ def _cmd_generate_plan(args: str, wb: WorkbenchState, workspace: Path, llm_adapt
         path = generate_standard_plan(item, workspace, llm_adapter, plan_index)
         if path:
             console.print(f"[green][{item.id}] Plan 已生成: {path}[/green]")
+            plan_content = Path(path).read_text() if path and Path(path).exists() else ""
+            memory_hooks.on_plan_generated(wb.project_name, item.title, plan_content[:2000])
         else:
             console.print("[yellow]Plan 生成需要 LLM 连接（当前不可用）。[/yellow]")
     elif version == "full":
@@ -238,6 +246,8 @@ def _cmd_generate_plan(args: str, wb: WorkbenchState, workspace: Path, llm_adapt
         path = generate_full_plan(item, plan_content, workspace, llm_adapter)
         if path:
             console.print(f"[green][{item.id}] 完整版 Plan 已生成: {path}[/green]")
+            plan_content = Path(path).read_text() if path and Path(path).exists() else ""
+            memory_hooks.on_plan_generated(wb.project_name, item.title, plan_content[:2000])
         else:
             console.print("[yellow]完整版 Plan 生成需要 LLM 连接（当前不可用）。[/yellow]")
 
@@ -294,6 +304,21 @@ def _read_item_file(source_path: str, file_location: str) -> str | None:
         return content
     except Exception:
         return None
+
+
+def _build_dialogue_summary(wb: WorkbenchState) -> str:
+    """Build a summary of the dialogue session for memory capture."""
+    active = [i for i in wb.items if i.status != ItemStatus.DISCARDED]
+    lines = [f"项目: {wb.project_name}", f"活跃优化方向: {len(active)}个"]
+    for item in active[:5]:
+        status_icon = {
+            ItemStatus.PLAN_DRAFTED: "已生成Plan",
+            ItemStatus.PLAN_REVIEWED: "已审核",
+            ItemStatus.DISCUSSING: "讨论中",
+            ItemStatus.PENDING: "待处理",
+        }.get(item.status, str(item.status.value))
+        lines.append(f"  [{status_icon}] {item.title}")
+    return "\n".join(lines)
 
 
 def _build_dialogue_context(wb: WorkbenchState, user_message: str) -> str:
