@@ -27,6 +27,12 @@ class LLMConfig:
     complex_model: str = "openai/gpt-5.5"
     complex_provider: str = "openai"
     models: dict = field(default_factory=dict)
+    pricing: dict = field(default_factory=lambda: {
+        "deepseek/deepseek-chat":   {"input": 0.14, "output": 0.28},
+        "deepseek/deepseek-v4-pro": {"input": 0.50, "output": 1.00},
+        "openai/gpt-4o":            {"input": 2.50, "output": 10.00},
+        "openai/gpt-4.1":           {"input": 2.00, "output": 8.00},
+    })
 
 
 @dataclass
@@ -94,6 +100,7 @@ def save_config(config: Config) -> None:
             "complex_model": config.llm.complex_model,
             "complex_provider": config.llm.complex_provider,
             "models": config.llm.models,
+            "pricing": config.llm.pricing,
         },
         "project": {"root_dir": config.project.root_dir},
         "pipeline": {
