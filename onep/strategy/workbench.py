@@ -309,6 +309,22 @@ def _build_dialogue_context(wb: WorkbenchState, user_message: str) -> str:
         file_content = _read_item_file(wb.source_path, current_item.file_location)
         if file_content:
             context_parts.append(f"\n相关代码:\n```\n{file_content}\n```")
+
+        # Inject relevant memories
+        try:
+            from onep.memory.manager import MemoryManager
+            search_query = current_item.title if current_item else user_message
+            mgr = MemoryManager()
+            memories = mgr.search(search_query, top_k=3, min_score=-1.0)
+            if memories:
+                context_parts.append("\n相关历史记忆:")
+                for m in memories:
+                    context_parts.append(
+                        f"  [{m.get('source_id', '?')}] {m.get('title', '?')}"
+                    )
+        except Exception:
+            pass  # memory system unavailable, skip silently
+
     recent = wb.dialogue[-10:] if wb.dialogue else []
     if recent:
         context_parts.append("\n最近对话:")
