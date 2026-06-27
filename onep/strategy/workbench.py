@@ -18,6 +18,7 @@ from onep.memory.context import (
     append_memory_context,
 )
 from onep.strategy.planner import generate_standard_plan, generate_full_plan
+from onep.strategy.project_context import load_project_context
 
 console = Console()
 
@@ -29,6 +30,7 @@ SLASH_COMMANDS = {
     "help": "help", "exit": "exit",
     "approve": "approve",
     "execute": "execute",
+    "rescan": "rescan",
 }
 
 HELP_TEXT = """\
@@ -46,6 +48,7 @@ HELP_TEXT = """\
   [bold]/status[/bold]              查看当前分析进度
   [bold]/save[/bold]                保存工作台
   [bold]/execute[/bold] <n>          执行第 n 个优化方向的开发+测试
+  [bold]/rescan[/bold]              重新扫描源码，刷新优化方向列表
   [bold]/help[/bold]                显示此帮助
   [bold]/exit[/bold]                保存并退出"""
 
@@ -130,6 +133,8 @@ def handle_slash_command(
         _cmd_status(wb)
     elif cmd == "execute":
         _cmd_execute(args, wb, workspace, llm_adapter)
+    elif cmd == "rescan":
+        wb = _cmd_rescan(wb, workspace, llm_adapter)
     elif cmd == "help":
         console.print(HELP_TEXT)
     elif cmd == "exit":
@@ -253,6 +258,100 @@ def _resolve_source_path(source_path: str, requested: str) -> Path | None:
     except ValueError:
         return None
     return target
+
+
+def _cmd_rescan(wb: WorkbenchState, workspace: Path,
+                llm_adapter=None) -> WorkbenchState:
+    """Re-run Layer 1 scan + Layer 2 analysis from scratch."""
+    if llm_adapter is None:
+        console.print("[red]LLM not available. Cannot rescan.[/red]")
+        return wb
+
+    source_path = Path(wb.source_path)
+    if not source_path.exists():
+        console.print(f"[red]Source path not found: {wb.source_path}[/red]")
+        return wb
+
+    from onep.strategy.scanner import walk_files, batch_files, parse_scan_response, get_strategy_files
+    from onep.strategy.analyzer import parse_analysis_response
+    from onep.orchestrator.brownfield import SCAN_PROMPT, ANALYZE_PROMPT
+    from onep.strategy.models import StrategyItem
+
+    # ---- Layer 1: Scan ----
+    console.print("\n[bold cyan]=== Rescan Layer 1: Scan ===[/bold cyan]")
+    all_files = walk_files(source_path)
+    batches = batch_files(all_files)
+    all_results = []
+
+    for i, batch in enumerate(batches):
+        relative_paths = [str(f.relative_to(source_path)) for f in batch]
+        prompt = SCAN_PROMPT.format(file_list="\n".join(relative_paths))
+        try:
+            response = llm_adapter.invoke(
+                system_prompt="You are the analyzer agent. Output JSON only.",
+                user_prompt=prompt, stage_name="analyzer",
+            )
+            batch_results = parse_scan_response(response) if response else []
+        except Exception:
+            from onep.strategy.scanner import ScanResult
+            batch_results = [
+                ScanResult(
+                    file_path=str(f.relative_to(source_path)),
+                    is_strategy=True, reason="LLM unavailable",
+                )
+                for f in batch
+            ]
+        all_results.extend(batch_results)
+        if len(batches) > 1:
+            console.print(f"  [dim]Batch {i + 1}/{len(batches)} done[/dim]")
+
+    strategy_files = get_strategy_files(all_results)
+    console.print(f"Scan: {len(all_files)} files, {len(strategy_files)} strategy-dense")
+
+    # ---- Layer 2: Analyze ----
+    console.print("\n[bold cyan]=== Rescan Layer 2: Analyze ===[/bold cyan]")
+    if strategy_files:
+        prompt = ANALYZE_PROMPT.format(
+            file_list="\n".join(f"- {f}" for f in strategy_files),
+            source_root=str(source_path),
+        )
+        try:
+            response = llm_adapter.invoke(
+                system_prompt="You are the strategy architect. Output JSON only.",
+                user_prompt=prompt, stage_name="strategy_architect",
+            )
+            items = parse_analysis_response(response) if response else []
+        except Exception:
+            items = [StrategyItem(
+                title="Rescan failed", file_location="N/A",
+                summary="LLM call failed during rescan.", tags=["system"], impact="high",
+            )]
+    else:
+        items = [StrategyItem(
+            title="No strategy files found", file_location="N/A",
+            summary="No strategy-dense files detected in the codebase.",
+            tags=["system"], impact="low",
+        )]
+
+    console.print(f"Analyze: {len(items)} optimization directions found")
+
+    # Replace workbench items
+    wb.items = items
+    wb.current_item_id = ""
+    wb.scan_complete = True
+    wb.analysis_complete = True
+    save_workbench(workspace, wb)
+
+    # Display new items
+    for i, item in enumerate(items, 1):
+        color = {"high": "red", "medium": "yellow", "low": "dim"}.get(item.impact, "white")
+        tags_str = f" [{', '.join(item.tags)}]" if item.tags else ""
+        console.print(
+            f"  [{i}] [{color}]{item.title}[/{color}] — "
+            f"{item.file_location}{tags_str} — {item.impact}"
+        )
+
+    return wb
 
 
 def _cmd_execute(args: str, wb: WorkbenchState, workspace: Path,
@@ -401,7 +500,8 @@ def _build_dialogue_summary(wb: WorkbenchState) -> str:
     return "\n".join(lines)
 
 
-def _build_dialogue_context(wb: WorkbenchState, user_message: str) -> str:
+def _build_dialogue_context(wb: WorkbenchState, user_message: str,
+                             workspace: Path | None = None) -> str:
     current_item = _find_item(wb, wb.current_item_id) if wb.current_item_id else None
     context_parts = [f"项目: {wb.project_name}", f"源路径: {wb.source_path}"]
     if current_item:
@@ -414,6 +514,11 @@ def _build_dialogue_context(wb: WorkbenchState, user_message: str) -> str:
         file_content = _read_item_file(wb.source_path, current_item.file_location)
         if file_content:
             context_parts.append(f"\n相关代码:\n```\n{file_content}\n```")
+
+    ctx_workspace = workspace or Path(wb.source_path)
+    ctx = load_project_context(ctx_workspace, wb.source_path)
+    if ctx:
+        context_parts.append(f"\n项目上下文:\n{ctx[:1500]}")
 
     recent = wb.dialogue[-10:] if wb.dialogue else []
     if recent:
@@ -491,7 +596,7 @@ def run_dialogue_loop(workspace: Path, wb: WorkbenchState, llm_adapter=None) -> 
                 role="user", content=message, item_id=wb.current_item_id,
             ))
             if llm_adapter is not None:
-                context = _build_dialogue_context(wb, message)
+                context = _build_dialogue_context(wb, message, workspace)
                 console.print(f"\n[bold green]🧠 Strategy Architect:[/bold green] ", end="")
                 response_parts: list[str] = []
                 try:

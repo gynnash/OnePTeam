@@ -1,123 +1,100 @@
-"""Optimize Engine -- shared 3-step execution for strategy items."""
+"""Optimize Engine — open agent loop for strategy item execution."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from rich.console import Console
 from onep.strategy.models import StrategyItem
+from onep.strategy.project_context import load_project_context
 
 console = Console()
 
-ARCHITECT_REFINE_PROMPT = """基于以下优化Plan，输出一份技术实现方案。
+EXECUTE_PROMPT = """你是一位全栈研发工程师。请根据以下优化 Plan，独立完成代码实现和验证。
 
-优化方向: {title}
-问题摘要: {summary}
-策略标签: {tags}
-影响级别: {impact}
-文件位置: {file_location}
+## 优化方向
 
-Plan 内容:
+- 标题: {title}
+- 文件位置: {file_location}
+- 问题摘要: {summary}
+- 策略标签: {tags}
+- 影响级别: {impact}
+
+## Plan 内容
+
 {plan_content}
 
-输出一份简洁的技术实现方案，包含:
-1. 需要修改的文件列表
-2. 每个文件的修改要点
-3. API 变更（如有）
-4. 实现风险"""
+## 源码位置
 
-DEVELOPER_PROMPT = """根据技术方案实现代码改动。
+{source_path}
 
-技术方案:
-{tech_plan}
+## 工作流程
 
-源代码位置: {source_path}
+请按以下步骤自主完成工作，遇到问题自行排查修复：
 
-请直接修改源码文件。使用 file_write 写入改动，使用 shell 运行 lint 检查。
-每个文件改动后确保代码可运行。"""
+1. **理解上下文**：用 grep 搜索相关代码，用 file_read 读取关键文件，理解现有实现
+2. **实现改动**：用 file_write 修改源码，每次修改聚焦一个文件
+3. **验证**：用 lint 检查代码质量，用 shell 运行测试
+4. **修复**：如果测试失败，分析失败原因，修改代码，重新测试，直到通过
+5. **报告**：完成后总结改动了哪些文件，测试结果如何
 
-TESTER_PROMPT = """验证代码改动。
-
-源代码位置: {source_path}
-改动文件: {files_changed}
-
-请运行相关测试。如果有 pytest 配置，运行 pytest。
-输出测试结果: passed/failed, 测试数量, 失败详情。"""
+要求：
+- 只修改必要的代码，不引入无关变更
+- 保持现有代码风格一致
+- 测试失败时必须修复，不要跳过"""
 
 
 class OptimizeEngine:
-    """3-step execution engine for strategy optimization items."""
+    """Open-loop execution engine for strategy optimization items."""
 
     def execute(self, item: StrategyItem, source_path: str, workspace: str,
                 llm_adapter=None) -> dict:
-        """Execute architect_refine, developer_implement, tester_verify.
+        """Execute a strategy item in an open agent loop.
+
+        The agent reads the Plan, understands the codebase, makes changes,
+        runs tests, fixes failures, and reports results — all in one call.
+
         Returns {success, files_changed, steps, test_output}.
         """
         result = {"success": False, "files_changed": [], "steps": []}
 
-        # Step 1: Architect refine
-        console.print("\n  [bold cyan]--- Step 1/3: ---[/bold cyan]")
-        tech_plan = self._step_architect(item, source_path, llm_adapter)
-        result["steps"].append({"name": "architect_refine", "output": tech_plan})
-
-        if not tech_plan:
-            result["error"] = "architect_refine produced no output"
-            return result
-
-        # Step 2: Developer implement
-        console.print("\n  [bold cyan]--- Step 2/3: ---[/bold cyan]")
-        impl_result = self._step_developer(tech_plan, source_path, llm_adapter)
-        result["steps"].append({"name": "developer_implement", "output": impl_result})
-
-        if not impl_result:
-            result["error"] = "developer_implement produced no output"
-            return result
-
-        result["files_changed"] = impl_result.get("files", [])
-
-        # Step 3: Tester verify
-        console.print("\n  [bold cyan]--- Step 3/3: ---[/bold cyan]")
-        test_result = self._step_tester(source_path, result["files_changed"], llm_adapter)
-        result["steps"].append({"name": "tester_verify", "output": test_result})
-        result["test_output"] = test_result
-        result["success"] = test_result.get("passed", False) if test_result else False
-
-        return result
-
-    def _step_architect(self, item, source_path, llm_adapter):
         if llm_adapter is None:
-            return "LLM not available -- cannot execute without API key"
+            result["error"] = "LLM not available"
+            result["steps"].append({"name": "execute", "output": "LLM not available"})
+            return result
+
         plan_content = ""
         if item.plan_path:
             p = Path(item.plan_path)
             if p.exists():
-                plan_content = p.read_text()[:3000]
-        prompt = ARCHITECT_REFINE_PROMPT.format(
-            title=item.title, summary=item.summary,
-            tags=", ".join(item.tags), impact=item.impact,
+                plan_content = p.read_text()[:4000]
+
+        prompt = EXECUTE_PROMPT.format(
+            title=item.title,
             file_location=item.file_location,
+            summary=item.summary,
+            tags=", ".join(item.tags) if item.tags else "",
+            impact=item.impact,
             plan_content=plan_content or item.summary,
-        )
-        return _invoke_stream(llm_adapter, "architect", prompt, source_path)
-
-    def _step_developer(self, tech_plan, source_path, llm_adapter):
-        if llm_adapter is None:
-            return {"output": "LLM not available", "files": []}
-        prompt = DEVELOPER_PROMPT.format(
-            tech_plan=tech_plan, source_path=source_path,
-        )
-        output = _invoke_stream(llm_adapter, "developer", prompt, source_path)
-        return {"output": output, "files": _extract_files(output)}
-
-    def _step_tester(self, source_path, files_changed, llm_adapter):
-        if llm_adapter is None:
-            return {"passed": False, "output": "LLM not available"}
-        prompt = TESTER_PROMPT.format(
             source_path=source_path,
-            files_changed=", ".join(files_changed) if files_changed else "unknown",
         )
-        output = _invoke_stream(llm_adapter, "tester", prompt, source_path)
-        passed = "passed" in output.lower() and "failed" not in output.lower()
-        return {"passed": passed, "output": output}
+
+        ctx = load_project_context(Path(workspace), source_path)
+        if ctx:
+            prompt = prompt + f"\n\n## 项目上下文\n\n{ctx[:2000]}"
+
+        output = _invoke_stream(llm_adapter, "developer", prompt, source_path)
+        result["steps"].append({"name": "execute", "output": output})
+
+        if not output:
+            result["error"] = "agent produced no output"
+            return result
+
+        result["files_changed"] = _extract_files(output)
+        passed = _check_test_result(output)
+        result["test_output"] = {"passed": passed, "output": output[:500]}
+        result["success"] = passed
+
+        return result
 
 
 def _invoke_stream(llm_adapter, agent_name: str, prompt: str,
@@ -129,14 +106,18 @@ def _invoke_stream(llm_adapter, agent_name: str, prompt: str,
     agent = get_agent(agent_name, workspace=source_path, source_id="")
     system_prompt = (
         f"{agent.role}\n\n"
-        f": {agent.goal}\n\n"
-        f": {agent.backstory}\n\n"
-        f""
+        f"目标: {agent.goal}\n\n"
+        f"背景: {agent.backstory}\n\n"
+        f"你可以使用 grep 搜索代码，用 file_read 读取文件，用 file_write 修改代码，"
+        f"用 shell 运行命令，用 lint 检查代码质量。"
+        f"遇到错误要自己排查修复，不要放弃。"
     )
     tools = getattr(agent, "tools", []) or []
     model_name, _ = resolve_model(agent_name)
 
     console.print(f"  [dim]Agent: {agent.role} | Model: {model_name}[/dim]")
+    tool_names = [t.name for t in tools]
+    console.print(f"  [dim]Tools: {', '.join(tool_names)}[/dim]")
 
     parts = []
     for event in llm_adapter.invoke_with_tools_stream(
@@ -144,7 +125,7 @@ def _invoke_stream(llm_adapter, agent_name: str, prompt: str,
         user_prompt=prompt,
         tools=tools,
         stage_name=agent_name,
-        max_tool_rounds=10,
+        max_tool_rounds=15,
     ):
         if event["type"] == "tool_call":
             args_str = ", ".join(
@@ -177,8 +158,18 @@ def _extract_files(output: str) -> list[str]:
     import re
     files = set()
     for m in re.finditer(
-        r'(?:file_write|modified|changed|written)[^\n]*?([\w./-]+\.\w+)',
+        r'(?:file_write|modified|changed|written|修改)[^\n]*?([\w./-]+\.\w+)',
         output,
     ):
         files.add(m.group(1))
-    return list(files)[:20]
+    return sorted(files)[:20]
+
+
+def _check_test_result(output: str) -> bool:
+    """Heuristic: did tests pass?"""
+    lower = output.lower()
+    if "passed" in lower and "failed" not in lower:
+        return True
+    if "error" in lower or "fail" in lower:
+        return False
+    return "success" in lower
