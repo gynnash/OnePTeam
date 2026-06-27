@@ -10,7 +10,6 @@ import subprocess
 import tempfile
 
 import click
-from crewai import Task, Crew, Process
 from rich.console import Console
 
 from onep.config import load_config
@@ -21,6 +20,11 @@ from onep.strategy.scanner import walk_files, batch_files, parse_scan_response, 
 from onep.strategy.analyzer import parse_analysis_response
 from onep.strategy.persistence import save_workbench
 from onep.memory import hooks as memory_hooks
+from onep.memory.context import (
+    MemoryContextBuilder,
+    MemoryContextRequest,
+    append_memory_context,
+)
 from onep.strategy.workbench import run_dialogue_loop
 from onep.agents.registry import get_agent
 from onep.orchestrator.brownfield import SCAN_PROMPT, ANALYZE_PROMPT
@@ -66,9 +70,13 @@ def _resolve_source(source: str) -> Path:
     return Path(source).resolve()
 
 
-def _build_agent_system_prompt(agent_name: str, workspace: str = "") -> str:
+def _build_agent_system_prompt(
+    agent_name: str, workspace: str = "", source_id: str = ""
+) -> str:
     """Build a system prompt from an agent's registered role, goal, and backstory."""
-    agent = get_agent(agent_name, workspace=workspace)
+    agent = get_agent(
+        agent_name, workspace=workspace, source_id=source_id
+    )
     return f"""{agent.role}
 
 目标: {agent.goal}
@@ -78,40 +86,115 @@ def _build_agent_system_prompt(agent_name: str, workspace: str = "") -> str:
 请按照用户指令完成工作，只输出要求的内容，不要额外解释。"""
 
 
-def _invoke_agent(agent_name: str, user_prompt: str, workspace: str = "") -> str | None:
+def _invoke_agent(
+    agent_name: str,
+    user_prompt: str,
+    workspace: str = "",
+    source_id: str = "",
+) -> str | None:
     """Invoke an agent via raw LLM call (no tools). For simple classification tasks."""
     try:
-        from onep.llm.adapters import get_llm
+        from onep.llm.adapters import get_llm, display_usage
         llm = get_llm()
-        return llm.invoke(
-            system_prompt=_build_agent_system_prompt(agent_name, workspace),
+        result = llm.invoke(
+            system_prompt=_build_agent_system_prompt(
+                agent_name, workspace, source_id
+            ),
             user_prompt=user_prompt,
             stage_name=agent_name,
         )
+        display_usage()
+        return result
     except Exception as e:
         console.print(f"[yellow]LLM 调用失败: {e}[/yellow]")
         return None
 
 
-def _invoke_agent_with_tools(agent_name: str, user_prompt: str, workspace: str = "") -> str | None:
-    """Invoke an agent via CrewAI with tool calling enabled.
+def _append_analysis_memory(
+    prompt: str,
+    agent_name: str,
+    project_name: str,
+    query: str,
+) -> str:
+    context = MemoryContextBuilder().build(MemoryContextRequest(
+        query=query,
+        stage_name=agent_name,
+        project_name=project_name,
+        source_id=f"brownfield:{project_name}",
+    ))
+    return append_memory_context(prompt, context)
 
-    The agent can read files, list directories, and use other registered tools
-    to complete the task. Falls back to raw invoke if CrewAI execution fails.
+
+def _build_scan_file_input(
+    source_path: Path,
+    files: list[Path],
+    max_file_chars: int = 6000,
+    max_batch_chars: int = 60000,
+) -> str:
+    sections = []
+    used = 0
+    for file_path in files:
+        relative = str(file_path.relative_to(source_path))
+        try:
+            content = file_path.read_text(errors="replace")[:max_file_chars]
+        except OSError:
+            content = "[无法读取]"
+        section = f"### {relative}\n```\n{content}\n```"
+        if used + len(section) > max_batch_chars:
+            break
+        sections.append(section)
+        used += len(section)
+    return "\n\n".join(sections)
+
+
+def _invoke_agent_with_tools(
+    agent_name: str,
+    user_prompt: str,
+    workspace: str = "",
+    source_id: str = "",
+) -> str | None:
+    """Invoke an agent with streaming tool calling.
+
+    Streams tokens in real-time. Shows brief progress for each tool call.
+    Falls back to raw invoke on failure.
     """
     try:
-        agent = get_agent(agent_name, workspace=workspace)
-        task = Task(
-            description=user_prompt,
-            expected_output="完成后输出最终结果。",
-            agent=agent,
+        agent = get_agent(
+            agent_name, workspace=workspace, source_id=source_id
         )
-        crew = Crew(agents=[agent], tasks=[task], process=Process.sequential, verbose=False)
-        result = crew.kickoff()
-        return str(result) if result else None
+        system_prompt = _build_agent_system_prompt(
+            agent_name, workspace, source_id
+        )
+        tools = getattr(agent, "tools", []) or []
+
+        from onep.llm.adapters import get_llm
+        llm = get_llm()
+
+        response_parts: list[str] = []
+        for event in llm.invoke_with_tools_stream(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            tools=tools,
+            stage_name=agent_name,
+        ):
+            if event["type"] == "tool_call":
+                args_str = ", ".join(
+                    f"{k}={repr(v)[:60]}" for k, v in event.get("tool_args", {}).items()
+                )
+                console.print(f"  [dim]调用 {event['tool_name']}({args_str})[/dim]")
+            elif event["type"] == "tool_call_result":
+                pass  # silent — result is fed back to LLM
+            elif event["type"] == "token":
+                console.print(event["content"], end="")
+                response_parts.append(event["content"])
+            elif event["type"] == "done":
+                pass
+
+        console.print()  # newline after streaming
+        return "".join(response_parts) if response_parts else None
     except Exception as e:
-        console.print(f"[yellow]CrewAI 工具调用失败，回退到裸调: {e}[/yellow]")
-        return _invoke_agent(agent_name, user_prompt, workspace)
+        console.print(f"[yellow]工具调用失败，回退到裸调: {e}[/yellow]")
+        return _invoke_agent(agent_name, user_prompt, workspace, source_id)
 
 
 def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str) -> None:
@@ -124,10 +207,21 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str) ->
     all_results = []
 
     for i, batch in enumerate(batches):
-        relative_paths = [str(f.relative_to(source_path)) for f in batch]
-        prompt = SCAN_PROMPT.format(file_list="\n".join(relative_paths))
+        scan_input = _build_scan_file_input(source_path, batch)
+        prompt = SCAN_PROMPT.format(file_list=scan_input)
+        prompt = _append_analysis_memory(
+            prompt,
+            "analyzer",
+            project_name,
+            f"{project_name} 策略扫描 " + " ".join(
+                str(f.relative_to(source_path)) for f in batch
+            ),
+        )
 
-        response = _invoke_agent("analyzer", prompt)
+        response = _invoke_agent(
+            "analyzer", prompt, workspace=str(source_path),
+            source_id=f"brownfield:{project_name}",
+        )
         if response:
             batch_results = parse_scan_response(response)
         else:
@@ -152,7 +246,18 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str) ->
             file_list="\n".join(f"- {f}" for f in strategy_files),
             source_root=str(source_path),
         )
-        response = _invoke_agent_with_tools("strategy_architect", prompt, workspace=str(source_path))
+        prompt = _append_analysis_memory(
+            prompt,
+            "strategy_architect",
+            project_name,
+            f"{project_name} 策略优化 " + " ".join(strategy_files),
+        )
+        response = _invoke_agent_with_tools(
+            "strategy_architect",
+            prompt,
+            workspace=str(source_path),
+            source_id=f"brownfield:{project_name}",
+        )
         items = parse_analysis_response(response) if response else _no_llm_items()
     else:
         items = [

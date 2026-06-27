@@ -5,6 +5,7 @@ from crewai import Agent
 
 from onep.agents.registry import register
 from onep.tools.filesystem import FileReadTool, FileListTool
+from onep.tools.memory import MemoryTool
 
 
 def _resolve_llm(agent_name: str) -> str:
@@ -14,12 +15,15 @@ def _resolve_llm(agent_name: str) -> str:
 
 
 @register("strategy_architect")
-def create_strategy_architect(workspace: str = "") -> Agent:
-    tools = []
+def create_strategy_architect(
+    workspace: str = "", source_id: str = ""
+) -> Agent:
+    tools = [MemoryTool(default_source_id=source_id)]
     if workspace:
         tools = [
             FileReadTool(workspace=workspace),
             FileListTool(workspace=workspace),
+            MemoryTool(default_source_id=source_id),
         ]
 
     return Agent(

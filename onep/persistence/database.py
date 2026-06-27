@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS projects (
     status TEXT NOT NULL,
     current_stage TEXT NOT NULL DEFAULT '',
     workspace_path TEXT NOT NULL,
+    requirement TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -81,6 +82,11 @@ def init_db() -> None:
     """Create tables if they don't exist."""
     conn = _connect()
     conn.executescript(SCHEMA)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
+    if "requirement" not in columns:
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN requirement TEXT NOT NULL DEFAULT ''"
+        )
     conn.commit()
     conn.close()
 
@@ -88,10 +94,11 @@ def init_db() -> None:
 def insert_project(project: Project) -> None:
     conn = _connect()
     conn.execute(
-        "INSERT INTO projects (id, name, mode, status, current_stage, workspace_path, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO projects (id, name, mode, status, current_stage, workspace_path, requirement, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (project.id, project.name, project.mode.value, project.status.value,
-         project.current_stage, project.workspace_path, project.created_at, project.updated_at),
+         project.current_stage, project.workspace_path, project.requirement,
+         project.created_at, project.updated_at),
     )
     conn.commit()
     conn.close()
@@ -117,6 +124,7 @@ def get_project(project_id: str) -> Optional[Project]:
         id=row["id"], name=row["name"],
         mode=ProjectMode(row["mode"]), status=ProjectStatus(row["status"]),
         current_stage=row["current_stage"], workspace_path=row["workspace_path"],
+        requirement=row["requirement"],
         created_at=row["created_at"], updated_at=row["updated_at"],
     )
 
@@ -130,6 +138,7 @@ def list_projects() -> list[Project]:
             id=r["id"], name=r["name"], mode=ProjectMode(r["mode"]),
             status=ProjectStatus(r["status"]), current_stage=r["current_stage"],
             workspace_path=r["workspace_path"], created_at=r["created_at"],
+            requirement=r["requirement"],
             updated_at=r["updated_at"],
         )
         for r in rows
@@ -158,6 +167,33 @@ def update_stage_run(sr: StageRun) -> None:
     )
     conn.commit()
     conn.close()
+
+
+def get_latest_stage_run(
+    project_id: str, stage_name: str
+) -> Optional[StageRun]:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM stage_runs WHERE project_id=? AND stage_name=? "
+        "ORDER BY started_at DESC LIMIT 1",
+        (project_id, stage_name),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return StageRun(
+        id=row["id"],
+        project_id=row["project_id"],
+        stage_name=row["stage_name"],
+        agent_name=row["agent_name"],
+        status=StageStatus(row["status"]),
+        model_used=row["model_used"],
+        token_count=row["token_count"],
+        output_files=json.loads(row["output_files"]),
+        error_message=row["error_message"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+    )
 
 
 def insert_approval(approval: Approval) -> None:

@@ -16,6 +16,11 @@ from onep.persistence.models import (
 )
 from onep.persistence.state import load_state, save_state
 from onep.memory import hooks as memory_hooks
+from onep.memory.context import (
+    MemoryContextBuilder,
+    MemoryContextRequest,
+    append_memory_context,
+)
 from onep.tools.git import GitTool
 from onep.orchestrator.greenfield import GREENFIELD_STAGES, STAGE_PROMPTS
 
@@ -85,29 +90,33 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
         if arch_path.exists():
             arch_content = arch_path.read_text()
 
-        user_prompt = STAGE_PROMPTS[stage_name].format(
-            requirement=project.requirement,
-            prd_content=prd_content,
-            design_content=design_content,
-            arch_content=arch_content,
-            workspace=str(workspace),
+        user_prompt = _build_stage_prompt(
+            stage_name,
+            project,
+            workspace,
+            prd_content,
+            design_content,
+            arch_content,
         )
 
-        system_prompt = _build_agent_system_prompt(stage["agent"], workspace=str(workspace))
+        system_prompt = _build_agent_system_prompt(
+            stage["agent"],
+            workspace=str(workspace),
+            source_id=f"greenfield:{project.name}",
+        )
 
         # ----- invoke LLM -----
         try:
             console.print(f"[dim]Agent {stage['agent']} working...[/dim]")
             response = _invoke_agent(stage["agent"], system_prompt, user_prompt)
 
-            if response is None:
-                console.print(
-                    "[yellow]LLM 不可用（请配置 API 密钥），Stage 跳过。"
-                    "Agent 会输出到聊天窗口，由用户手动执行。[/yellow]"
+            error = _stage_result_error(stage_name, response)
+            if error:
+                return _fail_stage(
+                    project, stage_run, state, workspace, error
                 )
-            else:
-                console.print(f"[dim]Response received ({len(response)} chars)[/dim]")
-                _save_agent_output(workspace, response, stage_name)
+            console.print(f"[dim]Response received ({len(response)} chars)[/dim]")
+            _save_agent_output(workspace, response, stage_name)
 
         except Exception as e:
             console.print(f"[red]Stage failed: {e}[/red]")
@@ -120,9 +129,18 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
 
         # ----- run subflows if applicable -----
         if stage_name == "developer":
-            _run_code_review(workspace)
+            subflow_passed = _run_code_review(workspace)
         elif stage_name == "tester":
-            _run_test_retry(workspace)
+            subflow_passed = _run_test_retry(workspace)
+        else:
+            subflow_passed = True
+        error = _stage_result_error(
+            stage_name, response, subflow_passed
+        )
+        if error:
+            return _fail_stage(
+                project, stage_run, state, workspace, error
+            )
 
         # ----- commit -----
         stage_run.complete(output_files=_detect_output_files(workspace, stage_name))
@@ -163,9 +181,45 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
     return True
 
 
-def _build_agent_system_prompt(agent_name: str, workspace: str = "") -> str:
+def _build_stage_prompt(
+    stage_name: str,
+    project: Project,
+    workspace: Path,
+    prd_content: str,
+    design_content: str,
+    arch_content: str,
+) -> str:
+    prompt = STAGE_PROMPTS[stage_name].format(
+        requirement=project.requirement,
+        prd_content=prd_content,
+        design_content=design_content,
+        arch_content=arch_content,
+        workspace=str(workspace),
+    )
+    query_parts = {
+        "pm": [project.requirement],
+        "designer": [project.requirement, prd_content],
+        "architect": [prd_content, design_content],
+        "developer": [arch_content],
+        "tester": [arch_content, "测试风险 边界条件"],
+        "devops": [arch_content, "部署 健康检查 回滚"],
+    }[stage_name]
+    context = MemoryContextBuilder().build(MemoryContextRequest(
+        query="\n".join(part[:2000] for part in query_parts if part),
+        stage_name=stage_name,
+        project_name=project.name,
+        source_id=f"greenfield:{project.name}",
+    ))
+    return append_memory_context(prompt, context)
+
+
+def _build_agent_system_prompt(
+    agent_name: str, workspace: str = "", source_id: str = ""
+) -> str:
     """Build a system prompt from an agent's registered role, goal, and backstory."""
-    agent = get_agent(agent_name, workspace=workspace)
+    agent = get_agent(
+        agent_name, workspace=workspace, source_id=source_id
+    )
     return (
         f"{agent.role}\n\n"
         f"目标: {agent.goal}\n\n"
@@ -177,15 +231,47 @@ def _build_agent_system_prompt(agent_name: str, workspace: str = "") -> str:
 def _invoke_agent(agent_name: str, system_prompt: str, user_prompt: str) -> str | None:
     """Invoke LLM via the adapter. Returns None if unavailable."""
     try:
-        from onep.llm.adapters import get_llm
-        return get_llm().invoke(
+        from onep.llm.adapters import get_llm, display_usage
+        result = get_llm().invoke(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             stage_name=agent_name,
         )
+        display_usage()
+        return result
     except Exception as e:
         console.print(f"[yellow]LLM 调用失败: {e}[/yellow]")
         return None
+
+
+def _stage_result_error(
+    stage_name: str,
+    response: str | None,
+    subflow_passed: bool = True,
+) -> str | None:
+    if not response or not response.strip():
+        return "LLM returned no output"
+    if not subflow_passed:
+        return f"{stage_name} validation failed"
+    return None
+
+
+def _fail_stage(
+    project: Project,
+    stage_run: StageRun,
+    state: PipelineState,
+    workspace: Path,
+    message: str,
+) -> bool:
+    console.print(f"[red]Stage failed: {message}[/red]")
+    stage_run.fail(message)
+    update_stage_run(stage_run)
+    project.status = ProjectStatus.FAILED
+    project.touch()
+    update_project(project)
+    state.current_stage = stage_run.stage_name
+    save_state(workspace, state)
+    return False
 
 
 def _save_agent_output(workspace: Path, response: str, stage_name: str) -> None:
@@ -215,7 +301,7 @@ def _save_agent_output(workspace: Path, response: str, stage_name: str) -> None:
         console.print(f"[dim]{saved} file(s) saved from agent response[/dim]")
 
 
-def _run_code_review(workspace: Path) -> None:
+def _run_code_review(workspace: Path) -> bool:
     """Run LangGraph code review subflow after developer stage."""
     try:
         from onep.subflows.code_review import run_code_review
@@ -223,13 +309,16 @@ def _run_code_review(workspace: Path) -> None:
         result = run_code_review(workspace)
         if result["status"] == "passed":
             console.print("[green]Code review: passed[/green]")
+            return True
         else:
             console.print(f"[yellow]Code review: {result['status']} (iteration {result['iteration']})[/yellow]")
+            return False
     except Exception as e:
         console.print(f"[dim]Code review skipped: {e}[/dim]")
+        return False
 
 
-def _run_test_retry(workspace: Path) -> None:
+def _run_test_retry(workspace: Path) -> bool:
     """Run LangGraph test retry subflow after tester stage."""
     try:
         from onep.subflows.test_retry import run_test_loop
@@ -237,11 +326,14 @@ def _run_test_retry(workspace: Path) -> None:
         result = run_test_loop(workspace, test_command="pytest tests/ -v --tb=short")
         if result["passed"]:
             console.print("[green]Tests: all passing[/green]")
+            return True
         else:
             console.print(f"[yellow]Tests: {result['status']} (iteration {result['iteration']})[/yellow]")
             console.print(f"[dim]{result['test_output'][:500]}[/dim]")
+            return False
     except Exception as e:
         console.print(f"[dim]Test retry skipped: {e}[/dim]")
+        return False
 
 
 def _detect_output_files(workspace: Path, stage_name: str) -> list[str]:

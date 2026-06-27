@@ -5,7 +5,10 @@ import click
 from rich.console import Console
 from rich.panel import Panel
 
-from onep.persistence.database import init_db, list_projects, update_project
+from onep.persistence.database import (
+    init_db, list_projects, update_project, get_latest_stage_run,
+    insert_approval,
+)
 
 console = Console()
 
@@ -79,9 +82,17 @@ def approve_cmd(project_name: str):
 
     from pathlib import Path
     from onep.persistence.state import load_state, save_state
-    from onep.persistence.models import ProjectStatus
+    from onep.persistence.models import ProjectStatus, Approval, Decision
 
     state = load_state(Path(project.workspace_path))
+    stage_run = get_latest_stage_run(project.id, project.current_stage)
+    if stage_run is None or not state.pending_approval:
+        console.print("[red]No pending approval found.[/red]")
+        return
+    insert_approval(Approval(
+        stage_run_id=stage_run.id,
+        decision=Decision.APPROVED,
+    ))
     state.pending_approval = False
     save_state(Path(project.workspace_path), state)
 
@@ -105,10 +116,22 @@ def reject_cmd(project_name: str, reason: str):
 
     from pathlib import Path
     from onep.persistence.state import load_state, save_state
-    from onep.persistence.models import ProjectStatus
+    from onep.persistence.models import ProjectStatus, Approval, Decision
 
     state = load_state(Path(project.workspace_path))
+    stage_run = get_latest_stage_run(project.id, project.current_stage)
+    if stage_run is None or not state.pending_approval:
+        console.print("[red]No pending approval found.[/red]")
+        return
+    insert_approval(Approval(
+        stage_run_id=stage_run.id,
+        decision=Decision.REJECTED,
+        feedback=reason,
+    ))
     state.pending_approval = False
+    if project.current_stage in state.stages_completed:
+        state.stages_completed.remove(project.current_stage)
+    state.current_stage = project.current_stage
     save_state(Path(project.workspace_path), state)
 
     project.status = ProjectStatus.RUNNING

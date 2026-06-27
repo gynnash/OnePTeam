@@ -25,6 +25,24 @@ def test_insert_and_get_project(mock_config_dir, tmp_path: Path):
 
 
 @mock.patch("onep.persistence.database._config_dir")
+def test_project_requirement_round_trip(mock_config_dir, tmp_path: Path):
+    mock_config_dir.return_value = tmp_path
+    init_db()
+    project = Project(
+        name="notes",
+        mode=ProjectMode.GREENFIELD,
+        workspace_path="/tmp/notes",
+        requirement="Build a private notes app",
+    )
+    insert_project(project)
+
+    loaded = get_project(project.id)
+
+    assert loaded is not None
+    assert loaded.requirement == "Build a private notes app"
+
+
+@mock.patch("onep.persistence.database._config_dir")
 def test_list_projects(mock_config_dir, tmp_path: Path):
     mock_config_dir.return_value = tmp_path
     init_db()

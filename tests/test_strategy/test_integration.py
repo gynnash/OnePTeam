@@ -4,6 +4,7 @@ from pathlib import Path
 from onep.strategy.models import WorkbenchState, StrategyItem, DialogueTurn
 from onep.strategy.persistence import save_workbench, load_workbench, append_dialogue
 from onep.strategy.workbench import parse_input
+from onep.cli.analyze import _append_analysis_memory, _build_scan_file_input
 
 
 def test_full_data_roundtrip(tmp_path: Path):
@@ -52,3 +53,36 @@ def test_plan_generation_flow():
     assert "Test Plan" in standard and "## 问题描述" in standard and "## 风险评估" in standard
     full = FULL_PLAN_APPENDIX.format(pseudocode="p", data_comparison="d", priority_and_dependencies="prio")
     assert "## 伪代码 / 架构变更" in full and "## 数据对比" in full and "## 优先级与依赖" in full
+
+
+def test_analysis_prompt_uses_project_aware_memory(monkeypatch):
+    captured = {}
+
+    def build(self, request):
+        captured["request"] = request
+        return "<relevant_memories>known strategy</relevant_memories>"
+
+    monkeypatch.setattr(
+        "onep.cli.analyze.MemoryContextBuilder.build", build
+    )
+
+    prompt = _append_analysis_memory(
+        "analyze code", "analyzer", "demo", "routing strategy"
+    )
+
+    assert "<relevant_memories>" in prompt
+    assert captured["request"].source_id == "brownfield:demo"
+    assert captured["request"].stage_name == "analyzer"
+
+
+def test_scan_input_contains_bounded_file_content(tmp_path):
+    source = tmp_path / "router.py"
+    source.write_text(
+        "def choose_model(task):\n"
+        "    return 'gpt' if task.complex else 'small'\n"
+    )
+
+    scan_input = _build_scan_file_input(tmp_path, [source])
+
+    assert "router.py" in scan_input
+    assert "def choose_model" in scan_input

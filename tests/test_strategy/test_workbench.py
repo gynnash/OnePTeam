@@ -1,8 +1,8 @@
 from pathlib import Path
-from onep.strategy.models import WorkbenchState, StrategyItem, ItemStatus
+from onep.strategy.models import WorkbenchState, StrategyItem, ItemStatus, PlanVersion
 from onep.strategy.workbench import (
     parse_input, _resolve_item_id, _find_item, _higher_impact,
-    handle_slash_command,
+    handle_slash_command, _build_dialogue_context, _cmd_read,
 )
 
 
@@ -60,3 +60,61 @@ def test_handle_slash_discard(tmp_path):
     wb.items.append(item)
     handle_slash_command("discard", "1", wb, tmp_path)
     assert item.status == ItemStatus.DISCARDED
+
+
+def test_dialogue_context_uses_project_aware_memory(tmp_path, monkeypatch):
+    item = StrategyItem(title="Cache", file_location="cache.py:1", tags=["缓存"])
+    wb = WorkbenchState(
+        project_name="demo", source_path=str(tmp_path), items=[item],
+        current_item_id=item.id,
+    )
+    captured = {}
+
+    def build(self, request):
+        captured["request"] = request
+        return "<relevant_memories>known</relevant_memories>"
+
+    monkeypatch.setattr(
+        "onep.strategy.workbench.MemoryContextBuilder.build", build
+    )
+
+    context = _build_dialogue_context(wb, "如何优化")
+
+    assert "<relevant_memories>" in context
+    assert captured["request"].source_id == "brownfield:demo"
+    assert "如何优化" in captured["request"].query
+
+
+def test_full_plan_requires_reviewed_status(tmp_path):
+    standard = tmp_path / "standard.md"
+    standard.write_text("# Standard")
+    item = StrategyItem(title="Cache", file_location="cache.py:1")
+    item.draft_plan(str(standard))
+    wb = WorkbenchState("demo", str(tmp_path), items=[item])
+
+    handle_slash_command("expand", "1", wb, tmp_path, llm_adapter=object())
+
+    assert item.plan_version == PlanVersion.STANDARD
+
+
+def test_approve_marks_standard_plan_reviewed(tmp_path):
+    standard = tmp_path / "standard.md"
+    standard.write_text("# Standard")
+    item = StrategyItem(title="Cache", file_location="cache.py:1")
+    item.draft_plan(str(standard))
+    wb = WorkbenchState("demo", str(tmp_path), items=[item])
+
+    handle_slash_command("approve", "1", wb, tmp_path)
+
+    assert item.status == ItemStatus.PLAN_REVIEWED
+
+
+def test_read_rejects_path_outside_source_root(tmp_path, capsys):
+    source = tmp_path / "source"
+    source.mkdir()
+    (tmp_path / "secret.txt").write_text("secret")
+    wb = WorkbenchState("demo", str(source))
+
+    _cmd_read("../secret.txt", wb)
+
+    assert "路径超出源码范围" in capsys.readouterr().out

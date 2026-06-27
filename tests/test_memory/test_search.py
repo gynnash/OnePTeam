@@ -53,7 +53,7 @@ def make_db(tmp_path):
             None,
             now - 100 * 86400,
             now - 100 * 86400,
-            0.1,
+            1.0,
         ),
         (
             "4",
@@ -94,6 +94,11 @@ def test_temporal_decay_reduces_old_scores(tmp_path):
     for r in results:
         if r["id"] == "3":
             assert r["decay_factor"] < 0.5
+
+    persisted = conn.execute(
+        "SELECT decay_factor FROM memory_entries WHERE id='3'"
+    ).fetchone()[0]
+    assert persisted < 0.5
 
 
 def test_compute_decay():

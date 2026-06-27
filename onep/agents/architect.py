@@ -3,16 +3,18 @@ from crewai import Agent
 
 from onep.agents.registry import register
 from onep.tools.filesystem import FileReadTool, FileWriteTool, FileListTool
+from onep.tools.memory import MemoryTool
 
 
 @register("architect")
-def create_architect(workspace: str = "") -> Agent:
-    tools = []
+def create_architect(workspace: str = "", source_id: str = "") -> Agent:
+    tools = [MemoryTool(default_source_id=source_id)]
     if workspace:
         tools = [
             FileReadTool(workspace=workspace),
             FileWriteTool(workspace=workspace),
             FileListTool(workspace=workspace),
+            MemoryTool(default_source_id=source_id),
         ]
 
     return Agent(

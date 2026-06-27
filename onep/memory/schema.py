@@ -15,8 +15,9 @@ def _ensure_dir(db_path: str) -> None:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
 
-def init_memory_db(db_path: str = MEMORY_DB_PATH) -> None:
+def init_memory_db(db_path: str | None = None) -> None:
     """Initialize the memory database, creating tables if absent."""
+    db_path = db_path or MEMORY_DB_PATH
     _ensure_dir(db_path)
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -77,9 +78,10 @@ def _migrate_add_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE memory_entries ADD COLUMN {col} {col_def}")
 
 
-def get_connection(db_path: str = MEMORY_DB_PATH) -> sqlite3.Connection:
+def get_connection(db_path: str | None = None) -> sqlite3.Connection:
     """Get a singleton SQLite connection. Thread-safe."""
     global _conn
+    db_path = db_path or MEMORY_DB_PATH
     with _lock:
         if _conn is None:
             _ensure_dir(db_path)

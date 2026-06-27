@@ -5,11 +5,12 @@ from onep.agents.registry import register
 from onep.tools.filesystem import FileReadTool, FileWriteTool, FileListTool
 from onep.tools.shell import ShellTool
 from onep.tools.lint import LintTool
+from onep.tools.memory import MemoryTool
 
 
 @register("developer")
-def create_developer(workspace: str = "") -> Agent:
-    tools = []
+def create_developer(workspace: str = "", source_id: str = "") -> Agent:
+    tools = [MemoryTool(default_source_id=source_id)]
     if workspace:
         tools = [
             FileReadTool(workspace=workspace),
@@ -17,6 +18,7 @@ def create_developer(workspace: str = "") -> Agent:
             FileListTool(workspace=workspace),
             ShellTool(workspace=workspace),
             LintTool(workspace=workspace),
+            MemoryTool(default_source_id=source_id),
         ]
 
     return Agent(

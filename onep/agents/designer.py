@@ -2,10 +2,11 @@
 from crewai import Agent
 
 from onep.agents.registry import register
+from onep.tools.memory import MemoryTool
 
 
 @register("designer")
-def create_designer() -> Agent:
+def create_designer(workspace: str = "", source_id: str = "") -> Agent:
     return Agent(
         role="UI/UX 设计师",
         goal="基于产品需求设计页面布局、交互流程、组件选型和视觉规范",
@@ -15,6 +16,7 @@ def create_designer() -> Agent:
             "你为 Web 和移动端设计，遵循现代设计系统规范（间距、颜色、排版）。"
             "你使用中文撰写设计文档。"
         ),
+        tools=[MemoryTool(default_source_id=source_id)],
         verbose=True,
         allow_delegation=False,
         max_iter=5,

@@ -5,17 +5,19 @@ from onep.agents.registry import register
 from onep.tools.filesystem import FileReadTool, FileWriteTool
 from onep.tools.shell import ShellTool
 from onep.tools.docker import DockerTool
+from onep.tools.memory import MemoryTool
 
 
 @register("devops")
-def create_devops(workspace: str = "") -> Agent:
-    tools = []
+def create_devops(workspace: str = "", source_id: str = "") -> Agent:
+    tools = [MemoryTool(default_source_id=source_id)]
     if workspace:
         tools = [
             FileReadTool(workspace=workspace),
             FileWriteTool(workspace=workspace),
             ShellTool(workspace=workspace),
             DockerTool(workspace=workspace),
+            MemoryTool(default_source_id=source_id),
         ]
 
     return Agent(

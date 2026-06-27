@@ -37,3 +37,12 @@ def test_schema_migration_adds_columns(tmp_path):
     init_memory_db(db_path)
     cols = {r[1] for r in sqlite3.connect(db_path).execute("PRAGMA table_info(memory_entries)")}
     assert "decay_factor" in cols
+
+
+def test_init_resolves_default_path_at_call_time(tmp_path, monkeypatch):
+    db_path = tmp_path / "runtime.db"
+    monkeypatch.setattr("onep.memory.schema.MEMORY_DB_PATH", str(db_path))
+
+    init_memory_db()
+
+    assert db_path.exists()

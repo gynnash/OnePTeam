@@ -5,6 +5,7 @@ from crewai.tools import BaseTool
 
 
 class MemoryTool(BaseTool):
+    default_source_id: str = ""
     name: str = "memory"
     description: str = (
         "Search past memories across projects, or capture a new memory. "
@@ -37,7 +38,7 @@ class MemoryTool(BaseTool):
             if not title or not content:
                 return "Error: 'title' and 'content' are required for capture."
             mgr.capture(
-                source_id=source_id or "agent",
+                source_id=source_id or self.default_source_id or "agent",
                 title=title,
                 content=content,
             )

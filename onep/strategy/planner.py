@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from onep.strategy.models import StrategyItem
 from onep.strategy.persistence import save_plan
+from onep.memory.context import append_memory_context
 
 
 STANDARD_PLAN_TEMPLATE = """# 优化 Plan: {title}
@@ -93,14 +94,17 @@ def _build_full_prompt(item: StrategyItem, standard_plan: str) -> str:
 
 def generate_standard_plan(
     item: StrategyItem, workspace: Path, llm_adapter=None, plan_index: int = 1,
+    memory_context: str = "",
 ) -> str | None:
     if llm_adapter is None:
         return None
-    prompt = _build_standard_prompt(item)
+    prompt = append_memory_context(_build_standard_prompt(item), memory_context)
     response = llm_adapter.invoke(
         system_prompt="你是一位策略架构师。请按照用户要求的格式输出完整的优化Plan。",
         user_prompt=prompt, stage_name="strategy_architect",
     )
+    from onep.llm.adapters import display_usage
+    display_usage()
     plan_id = f"{plan_index:03d}-{item.title.replace(' ', '-').replace('/', '-')[:50]}"
     plan_path = save_plan(workspace, plan_id, response)
     item.draft_plan(plan_path)
@@ -109,14 +113,19 @@ def generate_standard_plan(
 
 def generate_full_plan(
     item: StrategyItem, standard_plan_content: str, workspace: Path, llm_adapter=None,
+    memory_context: str = "",
 ) -> str | None:
     if llm_adapter is None:
         return None
-    prompt = _build_full_prompt(item, standard_plan_content)
+    prompt = append_memory_context(
+        _build_full_prompt(item, standard_plan_content), memory_context
+    )
     response = llm_adapter.invoke(
         system_prompt="你是一位策略架构师。请在标准版Plan的基础上补充完整版内容。",
         user_prompt=prompt, stage_name="strategy_architect",
     )
+    from onep.llm.adapters import display_usage
+    display_usage()
     full_content = standard_plan_content + "\n" + response
     plan_id = item.plan_path.split("/")[-1].replace(".md", "") if item.plan_path else "full-plan"
     plan_path = save_plan(workspace, plan_id + "-full", full_content)

@@ -2,7 +2,9 @@ from onep.orchestrator.greenfield import (
     GREENFIELD_STAGES,
     get_greenfield_stages,
     STAGE_PROMPTS,
+    build_greenfield_tasks,
 )
+from onep.persistence.models import Project, ProjectMode, PipelineState
 
 
 def test_greenfield_has_six_stages():
@@ -30,3 +32,16 @@ def test_prompts_contain_expected_placeholders():
         prompt = STAGE_PROMPTS[name]
         for ph in placeholders:
             assert ph in prompt, f"Stage '{name}' missing placeholder '{ph}'"
+
+
+def test_build_greenfield_tasks_formats_every_stage(tmp_path):
+    project = Project(
+        name="demo",
+        mode=ProjectMode.GREENFIELD,
+        workspace_path=str(tmp_path),
+        requirement="Build notes",
+    )
+
+    tasks = build_greenfield_tasks(project, PipelineState())
+
+    assert len(tasks) == 6

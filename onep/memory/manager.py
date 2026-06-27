@@ -89,12 +89,17 @@ class MemoryManager:
         query: str,
         top_k: int = 10,
         source_id: str | None = None,
-        min_score: float = -1.0,
+        exclude_source_id: str | None = None,
+        min_score: float = 0.0,
     ) -> list[dict[str, Any]]:
         """Search memories. Optionally filter by source_id."""
-        results = hybrid_search(self.conn, query, top_k=top_k)
-        if source_id:
-            results = [r for r in results if r.get("source_id") == source_id]
+        results = hybrid_search(
+            self.conn,
+            query,
+            top_k=top_k,
+            source_id=source_id,
+            exclude_source_id=exclude_source_id,
+        )
         results = [r for r in results if r.get("score", 0) >= min_score]
         return results[:top_k]
 

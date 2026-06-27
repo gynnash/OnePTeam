@@ -56,6 +56,14 @@ ANALYZE_PROMPT = """请对以下策略密集文件进行深度分析，发现可
 - 影响评估基于实际分析，不全部标 high
 - 按影响程度从高到低排序
 
+⚠️ 特别关注 LLM 输出质量问题，以下问题通常应标为 high 影响：
+- Prompt 设计缺陷：冗余、歧义、缺少关键约束、示例不足
+- Token 浪费：重复注入未缓存的内容、过长的 system prompt
+- 输出格式脆弱：JSON 解析容易失败、字段名不一致、缺少 schema 校验
+- 模型路由不当：复杂任务用了弱模型、缺少 fallback、未用 caching
+- Agent 循环失控：缺少 max_iter 限制、工具调用死循环风险
+- 流式处理缺失：可流式场景用了非流式，用户等待体验差
+
 只输出 JSON，每行一个对象，不要其他内容。"""
 
 
@@ -66,7 +74,11 @@ def build_brownfield_tasks(project: Project, state: PipelineState) -> list[Task]
         task = Task(
             description=f"Execute {stage['name']} for project {project.name}",
             expected_output=f"Stage {stage['name']} completed.",
-            agent=get_agent(stage["agent"], workspace=str(project.workspace_path)),
+            agent=get_agent(
+                stage["agent"],
+                workspace=str(project.workspace_path),
+                source_id=f"brownfield:{project.name}",
+            ),
         )
         tasks.append(task)
     return tasks

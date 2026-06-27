@@ -43,3 +43,38 @@ def test_generate_full_plan_no_llm(tmp_path: Path):
     ws = tmp_path
     (ws / ".onep").mkdir(parents=True, exist_ok=True)
     assert generate_full_plan(StrategyItem(title="Test", file_location="f:1"), "# s", ws, llm_adapter=None) is None
+
+
+class CapturingLLM:
+    def __init__(self):
+        self.user_prompt = ""
+
+    def invoke(self, **kwargs):
+        self.user_prompt = kwargs["user_prompt"]
+        return "# Generated plan"
+
+
+def test_standard_plan_prompt_contains_memory(tmp_path):
+    llm = CapturingLLM()
+    generate_standard_plan(
+        StrategyItem(title="Test", file_location="f:1"),
+        tmp_path,
+        llm_adapter=llm,
+        memory_context="<relevant_memories>past plan</relevant_memories>",
+    )
+
+    assert "<relevant_memories>" in llm.user_prompt
+
+
+def test_full_plan_prompt_contains_memory(tmp_path):
+    item = StrategyItem(title="Test", file_location="f:1")
+    llm = CapturingLLM()
+    generate_full_plan(
+        item,
+        "# Standard",
+        tmp_path,
+        llm_adapter=llm,
+        memory_context="<relevant_memories>past plan</relevant_memories>",
+    )
+
+    assert "<relevant_memories>" in llm.user_prompt

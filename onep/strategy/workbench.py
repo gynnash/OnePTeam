@@ -12,6 +12,11 @@ from onep.strategy.models import (
 )
 from onep.strategy.persistence import save_workbench, append_dialogue
 from onep.memory import hooks as memory_hooks
+from onep.memory.context import (
+    MemoryContextBuilder,
+    MemoryContextRequest,
+    append_memory_context,
+)
 from onep.strategy.planner import generate_standard_plan, generate_full_plan
 
 console = Console()
@@ -22,6 +27,7 @@ SLASH_COMMANDS = {
     "merge": "merge", "discard": "discard", "save": "save",
     "status": "status", "read": "read", "ls": "ls",
     "help": "help", "exit": "exit",
+    "approve": "approve",
 }
 
 HELP_TEXT = """\
@@ -99,6 +105,18 @@ def handle_slash_command(
             if item:
                 item.discard()
                 console.print(f"[yellow]已忽略: [{item_id}] {item.title}[/yellow]")
+    elif cmd == "approve":
+        item_id = _resolve_item_id(args, wb)
+        item = _find_item(wb, item_id) if item_id else None
+        if (
+            item
+            and item.status == ItemStatus.PLAN_DRAFTED
+            and item.plan_version == PlanVersion.STANDARD
+        ):
+            item.review_plan()
+            console.print(f"[green]已审核 Plan: [{item.id}] {item.title}[/green]")
+        else:
+            console.print("[red]仅可审核已生成的标准版 Plan。[/red]")
     elif cmd == "read":
         _cmd_read(args, wb)
     elif cmd == "ls":
@@ -188,7 +206,10 @@ def _cmd_read(args: str, wb: WorkbenchState) -> None:
     if not file_path:
         console.print("[red]用法: /read <file> 或先用 /focus 选择一个方向[/red]")
         return
-    full = Path(wb.source_path) / file_path
+    full = _resolve_source_path(wb.source_path, file_path)
+    if full is None:
+        console.print(f"[red]路径超出源码范围: {file_path}[/red]")
+        return
     if not full.exists():
         console.print(f"[red]文件不存在: {file_path}[/red]")
         return
@@ -203,8 +224,8 @@ def _cmd_read(args: str, wb: WorkbenchState) -> None:
 def _cmd_ls(args: str, wb: WorkbenchState) -> None:
     """List files in the source tree directory."""
     dir_path = args.strip() or "."
-    full = (Path(wb.source_path) / dir_path).resolve()
-    if not str(full).startswith(str(Path(wb.source_path).resolve())):
+    full = _resolve_source_path(wb.source_path, dir_path)
+    if full is None:
         console.print(f"[red]路径超出源码范围: {dir_path}[/red]")
         return
     if not full.exists():
@@ -220,6 +241,16 @@ def _cmd_ls(args: str, wb: WorkbenchState) -> None:
         console.print(f"[dim]... 还有 {len(items) - 50} 个条目[/dim]")
 
 
+def _resolve_source_path(source_path: str, requested: str) -> Path | None:
+    root = Path(source_path).resolve()
+    target = (root / requested).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    return target
+
+
 def _cmd_generate_plan(args: str, wb: WorkbenchState, workspace: Path, llm_adapter=None, version: str = "standard") -> None:
     item_id = _resolve_item_id(args, wb)
     if not item_id:
@@ -231,7 +262,11 @@ def _cmd_generate_plan(args: str, wb: WorkbenchState, workspace: Path, llm_adapt
     if version == "standard":
         active = [i for i in wb.items if i.status != ItemStatus.DISCARDED]
         plan_index = active.index(item) + 1 if item in active else 1
-        path = generate_standard_plan(item, workspace, llm_adapter, plan_index)
+        memory_context = _build_item_memory_context(wb, item, "生成标准版 Plan")
+        path = generate_standard_plan(
+            item, workspace, llm_adapter, plan_index,
+            memory_context=memory_context,
+        )
         if path:
             console.print(f"[green][{item.id}] Plan 已生成: {path}[/green]")
             plan_content = Path(path).read_text() if path and Path(path).exists() else ""
@@ -239,11 +274,19 @@ def _cmd_generate_plan(args: str, wb: WorkbenchState, workspace: Path, llm_adapt
         else:
             console.print("[yellow]Plan 生成需要 LLM 连接（当前不可用）。[/yellow]")
     elif version == "full":
-        if not item.plan_path or item.plan_version != PlanVersion.STANDARD:
+        if (
+            not item.plan_path
+            or item.plan_version != PlanVersion.STANDARD
+            or item.status != ItemStatus.PLAN_REVIEWED
+        ):
             console.print("[red]请先生成标准版 Plan，审核通过后再生成完整版。[/red]")
             return
         plan_content = Path(item.plan_path).read_text() if item.plan_path else ""
-        path = generate_full_plan(item, plan_content, workspace, llm_adapter)
+        memory_context = _build_item_memory_context(wb, item, "生成完整版 Plan")
+        path = generate_full_plan(
+            item, plan_content, workspace, llm_adapter,
+            memory_context=memory_context,
+        )
         if path:
             console.print(f"[green][{item.id}] 完整版 Plan 已生成: {path}[/green]")
             plan_content = Path(path).read_text() if path and Path(path).exists() else ""
@@ -335,21 +378,6 @@ def _build_dialogue_context(wb: WorkbenchState, user_message: str) -> str:
         if file_content:
             context_parts.append(f"\n相关代码:\n```\n{file_content}\n```")
 
-        # Inject relevant memories
-        try:
-            from onep.memory.manager import MemoryManager
-            search_query = current_item.title if current_item else user_message
-            mgr = MemoryManager()
-            memories = mgr.search(search_query, top_k=3, min_score=-1.0)
-            if memories:
-                context_parts.append("\n相关历史记忆:")
-                for m in memories:
-                    context_parts.append(
-                        f"  [{m.get('source_id', '?')}] {m.get('title', '?')}"
-                    )
-        except Exception:
-            pass  # memory system unavailable, skip silently
-
     recent = wb.dialogue[-10:] if wb.dialogue else []
     if recent:
         context_parts.append("\n最近对话:")
@@ -357,7 +385,38 @@ def _build_dialogue_context(wb: WorkbenchState, user_message: str) -> str:
             role_label = "用户" if turn.role == "user" else "Agent"
             context_parts.append(f"[{role_label}]: {turn.content[:200]}")
     context_parts.append(f"\n用户消息: {user_message}")
-    return "\n".join(context_parts)
+    query = " ".join(
+        part for part in [
+            current_item.title if current_item else "",
+            " ".join(current_item.tags) if current_item else "",
+            user_message,
+        ] if part
+    )
+    memory_context = MemoryContextBuilder().build(MemoryContextRequest(
+        query=query,
+        stage_name="strategy_architect",
+        project_name=wb.project_name,
+        source_id=f"brownfield:{wb.project_name}",
+    ))
+    return append_memory_context("\n".join(context_parts), memory_context)
+
+
+def _build_item_memory_context(
+    wb: WorkbenchState, item: StrategyItem, action: str
+) -> str:
+    return MemoryContextBuilder().build(MemoryContextRequest(
+        query=f"{item.title} {' '.join(item.tags)} {item.summary} {action}",
+        stage_name="strategy_architect",
+        project_name=wb.project_name,
+        source_id=f"brownfield:{wb.project_name}",
+    ))
+
+
+def _record_turn(
+    workspace: Path, wb: WorkbenchState, turn: DialogueTurn
+) -> None:
+    append_dialogue(workspace, turn)
+    wb.dialogue.append(turn)
 
 
 def run_dialogue_loop(workspace: Path, wb: WorkbenchState, llm_adapter=None) -> WorkbenchState:
@@ -385,13 +444,13 @@ def run_dialogue_loop(workspace: Path, wb: WorkbenchState, llm_adapter=None) -> 
                 break
             else:
                 handle_slash_command(cmd, args, wb, workspace, llm_adapter)
-            append_dialogue(workspace, DialogueTurn(
+            _record_turn(workspace, wb, DialogueTurn(
                 role="user", content=message or f"/{cmd} {args}".strip(),
                 item_id=wb.current_item_id,
                 slash_command=f"/{cmd} {args}".strip() if cmd else None,
             ))
         else:
-            append_dialogue(workspace, DialogueTurn(
+            _record_turn(workspace, wb, DialogueTurn(
                 role="user", content=message, item_id=wb.current_item_id,
             ))
             if llm_adapter is not None:
@@ -408,9 +467,11 @@ def run_dialogue_loop(workspace: Path, wb: WorkbenchState, llm_adapter=None) -> 
                 except Exception:
                     pass
                 console.print("\n")
+                from onep.llm.adapters import display_usage
+                display_usage()
                 response = "".join(response_parts)
                 if response:
-                    append_dialogue(workspace, DialogueTurn(
+                    _record_turn(workspace, wb, DialogueTurn(
                         role="agent", content=response, item_id=wb.current_item_id,
                     ))
             else:

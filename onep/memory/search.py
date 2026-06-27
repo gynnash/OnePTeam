@@ -14,9 +14,11 @@ def hybrid_search(
     query: str,
     top_k: int = 10,
     alpha: float = 0.7,
+    source_id: str | None = None,
+    exclude_source_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Run hybrid search returning top_k results after MMR + decay."""
-    all_rows = _fetch_all_entries(conn)
+    all_rows = _fetch_all_entries(conn, source_id, exclude_source_id)
     if not all_rows:
         return []
 
@@ -39,13 +41,15 @@ def hybrid_search(
     kw_scores: dict[str, float] = {}
     try:
         rows = conn.execute(
-            "SELECT rowid, rank FROM memory_fts WHERE memory_fts MATCH ? ORDER BY rank",
+            "SELECT e.id, bm25(memory_fts) "
+            "FROM memory_fts JOIN memory_entries e ON e.rowid = memory_fts.rowid "
+            "WHERE memory_fts MATCH ? ORDER BY bm25(memory_fts)",
             (query,),
         ).fetchall()
         if rows:
             max_rank = max(abs(r[1]) for r in rows) or 1
-            for rowid, rank in rows:
-                kw_scores[str(rowid)] = 1.0 / (1.0 + abs(rank) / max_rank)
+            for entry_id, rank in rows:
+                kw_scores[entry_id] = 1.0 / (1.0 + abs(rank) / max_rank)
     except sqlite3.OperationalError:
         pass
     if not kw_scores:
@@ -69,11 +73,18 @@ def hybrid_search(
         scores[row["id"]] = alpha * v + (1 - alpha) * k
 
     # --- temporal decay ---
+    decay_updates = []
     for row in all_rows:
         row["decay_factor"] = _compute_decay(row["created_at"], now)
+        decay_updates.append((row["decay_factor"], row["id"]))
         scores[row["id"]] *= row["decay_factor"]
         imp = row.get("importance", 0) or 0
         scores[row["id"]] *= 1.0 + imp * 0.1
+    conn.executemany(
+        "UPDATE memory_entries SET decay_factor=? WHERE id=?",
+        decay_updates,
+    )
+    conn.commit()
 
     # --- sort by score ---
     scored = [(row, scores.get(row["id"], 0)) for row in all_rows]
@@ -85,12 +96,27 @@ def hybrid_search(
     return [dict(r, score=s) for r, s in selected]
 
 
-def _fetch_all_entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    rows = conn.execute(
+def _fetch_all_entries(
+    conn: sqlite3.Connection,
+    source_id: str | None = None,
+    exclude_source_id: str | None = None,
+) -> list[dict[str, Any]]:
+    query = (
         "SELECT id, source_id, title, content, tags, importance, "
         "embedding, embedding_model, created_at, updated_at, decay_factor "
         "FROM memory_entries"
-    ).fetchall()
+    )
+    clauses = []
+    params = []
+    if source_id:
+        clauses.append("source_id = ?")
+        params.append(source_id)
+    if exclude_source_id:
+        clauses.append("source_id != ?")
+        params.append(exclude_source_id)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    rows = conn.execute(query, params).fetchall()
     cols = [
         "id",
         "source_id",

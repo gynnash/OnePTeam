@@ -15,11 +15,23 @@ def create_crew(project: Project, state: PipelineState) -> Crew:
     if project.mode.value == "greenfield":
         from onep.orchestrator.greenfield import build_greenfield_tasks, GREENFIELD_STAGES
         tasks = build_greenfield_tasks(project, state)
-        agents = [get_agent(s["agent"], workspace=ws) for s in GREENFIELD_STAGES]
+        agents = [
+            get_agent(
+                s["agent"], workspace=ws,
+                source_id=f"greenfield:{project.name}",
+            )
+            for s in GREENFIELD_STAGES
+        ]
     else:
         from onep.orchestrator.brownfield import build_brownfield_tasks, BROWNFIELD_STAGES
         tasks = build_brownfield_tasks(project, state)
-        agents = [get_agent(s["agent"], workspace=ws) for s in BROWNFIELD_STAGES]
+        agents = [
+            get_agent(
+                s["agent"], workspace=ws,
+                source_id=f"brownfield:{project.name}",
+            )
+            for s in BROWNFIELD_STAGES
+        ]
 
     return Crew(
         agents=agents,

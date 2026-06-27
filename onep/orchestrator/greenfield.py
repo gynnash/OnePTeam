@@ -126,19 +126,29 @@ def build_greenfield_tasks(project: Project, state: PipelineState) -> list[Task]
 
     prd_path = workspace / "docs" / "PRD.md"
     prd_content = prd_path.read_text() if prd_path.exists() else ""
+    design_path = workspace / "docs" / "DESIGN.md"
+    design_content = design_path.read_text() if design_path.exists() else ""
+    arch_path = workspace / "docs" / "ARCHITECTURE.md"
+    arch_content = arch_path.read_text() if arch_path.exists() else ""
 
     tasks = []
     for stage in GREENFIELD_STAGES:
         prompt = STAGE_PROMPTS[stage["name"]].format(
             requirement=requirement,
             prd_content=prd_content,
+            design_content=design_content,
+            arch_content=arch_content,
             workspace=str(workspace),
         )
 
         task = Task(
             description=prompt,
             expected_output=f"Stage {stage['name']} completed. Output saved to workspace.",
-            agent=get_agent(stage["agent"], workspace=str(workspace)),
+            agent=get_agent(
+                stage["agent"],
+                workspace=str(workspace),
+                source_id=f"greenfield:{project.name}",
+            ),
         )
         tasks.append(task)
 

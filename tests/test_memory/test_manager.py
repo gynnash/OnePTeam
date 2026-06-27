@@ -47,6 +47,29 @@ def test_search_by_source(tmp_path):
     results = mgr.search("缓存", source_id="src-A")
     assert all(r["source_id"] == "src-A" for r in results)
 
+
+def test_search_filters_source_before_top_k(tmp_path):
+    mgr = MemoryManager(str(tmp_path / "mem.db"))
+    mgr.capture("src-A", "shared", "shared query")
+    mgr.capture("src-B", "shared", "shared query", importance=10)
+
+    results = mgr.search("shared query", top_k=1, source_id="src-A")
+
+    assert [r["source_id"] for r in results] == ["src-A"]
+
+
+def test_search_can_exclude_source(tmp_path):
+    mgr = MemoryManager(str(tmp_path / "mem.db"))
+    mgr.capture("src-A", "cache", "cache strategy")
+    mgr.capture("src-B", "cache", "cache strategy")
+
+    results = mgr.search(
+        "cache strategy", top_k=5, exclude_source_id="src-A"
+    )
+
+    assert results
+    assert all(r["source_id"] != "src-A" for r in results)
+
 def test_get_status(tmp_path):
     override_db_path(tmp_path)
     init_memory_db()
