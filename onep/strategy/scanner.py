@@ -1,6 +1,7 @@
 """Scanner utilities: file walking, batching, and result filtering."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -40,7 +41,6 @@ def batch_files(files: list[Path], max_batch_size: int = 20) -> list[list[Path]]
 
 def parse_scan_response(response: str) -> list[ScanResult]:
     """Parse LLM JSONL response into ScanResult objects."""
-    import json
     results = []
     for line in response.strip().split("\n"):
         line = line.strip()
@@ -61,3 +61,15 @@ def parse_scan_response(response: str) -> list[ScanResult]:
 def get_strategy_files(results: list[ScanResult]) -> list[str]:
     """Filter scan results to only strategy-relevant files."""
     return [r.file_path for r in results if r.is_strategy]
+
+
+def load_batch_results(workspace: Path) -> list[dict]:
+    """Load analysis items from JSONL file in workspace."""
+    path = workspace / "analysis_items.jsonl"
+    if not path.exists():
+        return []
+    items = []
+    for line in path.read_text().strip().split("\n"):
+        if line.strip():
+            items.append(json.loads(line))
+    return items
