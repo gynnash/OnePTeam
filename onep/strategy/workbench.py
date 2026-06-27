@@ -28,6 +28,7 @@ SLASH_COMMANDS = {
     "status": "status", "read": "read", "ls": "ls",
     "help": "help", "exit": "exit",
     "approve": "approve",
+    "execute": "execute",
 }
 
 HELP_TEXT = """\
@@ -44,6 +45,7 @@ HELP_TEXT = """\
   [bold]/ls[/bold] <dir>            列出源码树目录内容
   [bold]/status[/bold]              查看当前分析进度
   [bold]/save[/bold]                保存工作台
+  [bold]/execute[/bold] <n>          执行第 n 个优化方向的开发+测试
   [bold]/help[/bold]                显示此帮助
   [bold]/exit[/bold]                保存并退出"""
 
@@ -126,6 +128,8 @@ def handle_slash_command(
         console.print("[green]工作台已保存。[/green]")
     elif cmd == "status":
         _cmd_status(wb)
+    elif cmd == "execute":
+        _cmd_execute(args, wb, workspace, llm_adapter)
     elif cmd == "help":
         console.print(HELP_TEXT)
     elif cmd == "exit":
@@ -249,6 +253,39 @@ def _resolve_source_path(source_path: str, requested: str) -> Path | None:
     except ValueError:
         return None
     return target
+
+
+def _cmd_execute(args: str, wb: WorkbenchState, workspace: Path,
+                 llm_adapter=None) -> None:
+    """Execute develop+test for an optimization item."""
+    item_id = _resolve_item_id(args, wb)
+    if not item_id:
+        console.print(f"[red]未找到方向: {args}[/red]")
+        return
+    item = _find_item(wb, item_id)
+    if not item:
+        return
+    if not item.plan_path:
+        console.print("[red]请先生成 Plan（使用 /plan 命令）[/red]")
+        return
+
+    from onep.strategy.optimize_engine import OptimizeEngine
+    engine = OptimizeEngine()
+    result = engine.execute(item, wb.source_path, str(workspace), llm_adapter)
+
+    if result["success"]:
+        console.print(f"\n[green]已执行: {item.title}[/green]")
+        files = result.get("files_changed", [])
+        if files:
+            console.print(f"  变更文件: {', '.join(files)}")
+        if result.get("test_output"):
+            test_out = result["test_output"]
+            if isinstance(test_out, dict):
+                console.print(f"  测试输出: {test_out.get('output', '')[:200]}")
+    else:
+        console.print(f"\n[red]执行失败: {item.title}[/red]")
+        if result.get("error"):
+            console.print(f"[red]{result['error']}[/red]")
 
 
 def _cmd_generate_plan(args: str, wb: WorkbenchState, workspace: Path, llm_adapter=None, version: str = "standard") -> None:
