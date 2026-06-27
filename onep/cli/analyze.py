@@ -31,6 +31,9 @@ from onep.memory.context import (
 from onep.strategy.workbench import run_dialogue_loop
 from onep.agents.registry import get_agent
 from onep.orchestrator.brownfield import SCAN_PROMPT, ANALYZE_PROMPT
+from onep.llm.cost import CostTracker, estimate_scan_cost, estimate_analyze_cost
+from onep.llm.router import resolve_model
+from onep.llm.adapters import get_llm
 
 console = Console()
 
@@ -40,7 +43,9 @@ console = Console()
 @click.option("--mode", "-m", type=click.Choice(["code", "strategy"]), default="strategy",
               help="Analysis mode")
 @click.option("--name", "-n", default=None, help="Project name")
-def analyze_cmd(source: str, mode: str, name: str | None):
+@click.option("--max-cost", type=float, default=0,
+              help="Maximum cost in USD (0 = no limit)")
+def analyze_cmd(source: str, mode: str, name: str | None, max_cost: float = 0):
     """Analyze a codebase for strategy optimizations.
 
     SOURCE can be a local path or a git repository URL.
@@ -58,7 +63,7 @@ def analyze_cmd(source: str, mode: str, name: str | None):
     insert_project(project)
     console.print(f"[bold]Source:[/bold] {source_path}\n[bold]Workspace:[/bold] {workspace}")
     if mode == "strategy":
-        _run_strategy_mode(source_path, workspace, name)
+        _run_strategy_mode(source_path, workspace, name, max_cost=max_cost)
     else:
         console.print(f"[yellow]Mode '{mode}' not yet implemented.[/yellow]")
 
@@ -215,7 +220,9 @@ def _invoke_agent_with_tools(
         return _invoke_agent(agent_name, user_prompt, workspace, source_id)
 
 
-def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str, from_layer: str | None = None) -> None:
+def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str, from_layer: str | None = None, max_cost: float = 0) -> None:
+    tracker = CostTracker(budget=max_cost)
+
     # Handle from_layer
     if from_layer == "2" or from_layer == "3":
         pstate = PipelineState(project_name=project_name, workspace=str(workspace))
@@ -226,6 +233,11 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str, fr
     console.print("[dim]代码分析师 Agent 扫描中...[/dim]")
 
     all_files = walk_files(source_path)
+    if max_cost > 0:
+        est_scan = estimate_scan_cost(len(all_files))
+        console.print(f"[dim]扫描 {len(all_files)} 个文件，预估扫描成本: ~${est_scan:.4f}[/dim]")
+        if not click.confirm("Continue? [Y/n]", default=True):
+            return
     batches = batch_files(all_files)
     all_results = []
 
@@ -264,6 +276,18 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str, fr
                     {"batch": i, "files": len(batch), "retries": 3}
                 )
 
+            # Track cost after scan LLM invoke
+            if max_cost > 0:
+                llm = get_llm()
+                if not llm.usage.is_empty:
+                    tracker.add_usage(llm.usage.prompt_tokens, llm.usage.completion_tokens,
+                                      resolve_model("analyzer")[0])
+                    if not tracker.can_continue():
+                        console.print(f"[red]预算超限 ({tracker.summary()})，已停止[/red]")
+                        pstate.total_cost = tracker.spent
+                        pstate.save()
+                        return
+
             save_batch_results(workspace, i, batch_results)
             pstate.scan_completed_batches.append(i)
             pstate.save()
@@ -273,6 +297,8 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str, fr
                 console.print(f"  [dim]批次 {i + 1}/{len(batches)} 完成[/dim]")
 
         pstate.complete_layer(Layer.SCAN)
+
+    console.print(f"[dim]当前花费: {tracker.summary()}[/dim]")
 
     strategy_files = get_strategy_files(all_results)
     console.print(f"扫描完成: {len(all_files)} 个文件, {len(strategy_files)} 个策略密集文件")
@@ -298,6 +324,17 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str, fr
             workspace=str(source_path),
             source_id=f"brownfield:{project_name}",
         )
+        # Track cost after analyze LLM invoke
+        if max_cost > 0:
+            llm = get_llm()
+            if not llm.usage.is_empty:
+                tracker.add_usage(llm.usage.prompt_tokens, llm.usage.completion_tokens,
+                                  resolve_model("strategy_architect")[0])
+                if not tracker.can_continue():
+                    console.print(f"[red]预算超限 ({tracker.summary()})，已停止[/red]")
+                    pstate.total_cost = tracker.spent
+                    pstate.save()
+                    return
         items = parse_analysis_response(response) if response else _no_llm_items()
     else:
         items = [
@@ -327,6 +364,7 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str, fr
         )
 
     save_workbench(workspace, wb)
+    console.print(f"[dim]当前花费: {tracker.summary()}[/dim]")
 
     # ------- Layer 3: Dialogue -------
     console.print(f"\n[bold cyan]=== Layer 3: 交互式对话 ===[/bold cyan]")
