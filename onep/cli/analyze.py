@@ -16,11 +16,15 @@ from onep.config import load_config
 from onep.persistence.database import init_db, insert_project
 from onep.persistence.models import Project, ProjectMode
 from onep.strategy.models import WorkbenchState, StrategyItem
-from onep.strategy.scanner import walk_files, batch_files, parse_scan_response, get_strategy_files
+from onep.strategy.scanner import walk_files, batch_files, parse_scan_response, get_strategy_files, ScanResult
 from onep.strategy.scanner import save_batch_results, load_batch_results, get_completed_batch_indices
 from onep.strategy.pipeline_state import PipelineState, Layer, Status
 from onep.strategy.retry import retry_with_backoff
+from onep.strategy.scan_cache import ScanCache, file_hash
 from onep.strategy.analyzer import parse_analysis_response, parse_streaming_items, save_analysis_items, load_analysis_items
+from onep.strategy.project_context import (
+    generate_project_context, load_project_context, merge_manual_context,
+)
 from onep.strategy.persistence import save_workbench
 from onep.memory import hooks as memory_hooks
 from onep.memory.context import (
@@ -30,7 +34,7 @@ from onep.memory.context import (
 )
 from onep.strategy.workbench import run_dialogue_loop
 from onep.agents.registry import get_agent
-from onep.orchestrator.brownfield import SCAN_PROMPT, ANALYZE_PROMPT
+from onep.orchestrator.brownfield import SCAN_PROMPT, SCAN_PROMPT_FULL, RECHECK_PROMPT, ANALYZE_PROMPT
 from onep.llm.cost import CostTracker, estimate_scan_cost, estimate_analyze_cost
 from onep.llm.router import resolve_model
 from onep.llm.adapters import get_llm
@@ -111,11 +115,16 @@ def _invoke_agent(
     """Invoke an agent via raw LLM call (no tools). For simple classification tasks."""
     try:
         from onep.llm.adapters import get_llm, display_usage
+        from onep.llm.router import resolve_model
         llm = get_llm()
+        system_prompt = _build_agent_system_prompt(
+            agent_name, workspace, source_id
+        )
+        model_name, provider = resolve_model(agent_name)
+        _print_agent_trace(get_agent(agent_name, workspace=workspace, source_id=source_id),
+                          agent_name, system_prompt, [], model_name, provider)
         result = llm.invoke(
-            system_prompt=_build_agent_system_prompt(
-                agent_name, workspace, source_id
-            ),
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             stage_name=agent_name,
         )
@@ -163,6 +172,18 @@ def _build_scan_file_input(
     return "\n\n".join(sections)
 
 
+def _print_agent_trace(agent, agent_name: str, system_prompt: str,
+                      tools: list, model_name: str, provider: str) -> None:
+    """Print trace info: agent persona, model, system prompt preview."""
+    tool_names = [t.name for t in tools] if tools else ["(none)"]
+    prompt_preview = system_prompt[:300].replace("\n", " ")
+
+    console.print(f"  [dim]Agent:[/dim] {agent.role}")
+    console.print(f"  [dim]Model:[/dim] {model_name} ({provider})")
+    console.print(f"  [dim]Tools:[/dim] {', '.join(tool_names)}")
+    console.print(f"  [dim]System:[/dim] {prompt_preview}...")
+
+
 def _brief(value) -> str:
     """Short display for tool call arguments."""
     s = str(value)
@@ -195,7 +216,12 @@ def _invoke_agent_with_tools(
         tools = getattr(agent, "tools", []) or []
 
         from onep.llm.adapters import get_llm
+        from onep.llm.router import resolve_model
         llm = get_llm()
+        model_name, provider = resolve_model(agent_name)
+
+        _print_agent_trace(agent, agent_name, system_prompt, tools,
+                          model_name, provider)
 
         response_parts: list[str] = []
         for event in llm.invoke_with_tools_stream(
@@ -262,6 +288,7 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str,
     # ------- Layer 1: Scan -------
     console.print("\n[bold cyan]=== Layer 1: 快速扫描 ===[/bold cyan]")
     console.print("[dim]代码分析师 Agent 扫描中...[/dim]")
+    cache = ScanCache(workspace)
 
     all_files = walk_files(source_path)
     if max_cost > 0:
@@ -289,23 +316,51 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str,
                 pstate.scan_completed_batches.append(i)
                 continue
 
-            relative_paths = [str(f.relative_to(source_path)) for f in batch]
-            prompt = SCAN_PROMPT.format(file_list="\n".join(relative_paths))
+            # Split batch into cached and uncached files
+            batch_results = []
+            uncached = []
+            for f in batch:
+                relative = str(f.relative_to(source_path))
+                try:
+                    content = f.read_text()
+                except Exception:
+                    content = ""
+                cached = cache.get(relative, content)
+                if cached:
+                    batch_results.append(ScanResult(
+                        file_path=relative,
+                        is_strategy=cached["is_strategy"],
+                        reason=cached["reason"],
+                    ))
+                else:
+                    uncached.append((f, relative, content))
 
-            def do_invoke():
-                return _invoke_agent("analyzer", prompt)
-
-            response = retry_with_backoff(do_invoke)
-            if response:
-                batch_results = parse_scan_response(response)
-            else:
-                batch_results = [
-                    _no_llm_scan_result(str(f.relative_to(source_path)))
-                    for f in batch
-                ]
-                pstate.scan_failed_batches.append(
-                    {"batch": i, "files": len(batch), "retries": 3}
+            if uncached:
+                file_block = _build_scan_file_input(
+                    source_path, [f for f, _, _ in uncached]
                 )
+                prompt = SCAN_PROMPT_FULL.format(file_block=file_block)
+
+                def do_invoke():
+                    return _invoke_agent("analyzer", prompt)
+
+                response = retry_with_backoff(do_invoke)
+                if response:
+                    new_results = parse_scan_response(response)
+                    for r in new_results:
+                        for f, rel, content in uncached:
+                            if r.file_path == rel:
+                                cache.put(rel, content, r.is_strategy, r.reason)
+                                break
+                    batch_results.extend(new_results)
+                else:
+                    for f, relative, content in uncached:
+                        result = _no_llm_scan_result(relative)
+                        batch_results.append(result)
+                        cache.put(relative, content, result.is_strategy, result.reason)
+                    pstate.scan_failed_batches.append(
+                        {"batch": i, "files": len(uncached), "retries": 3}
+                    )
 
             # Track cost after scan LLM invoke
             if max_cost > 0:
@@ -332,6 +387,36 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str,
     console.print(f"[dim]当前花费: {tracker.summary()}[/dim]")
 
     strategy_files = get_strategy_files(all_results)
+
+    # Layer 1B: Re-check
+    if strategy_files:
+        filtered = []
+        for sf in strategy_files:
+            full = source_path / sf
+            try:
+                content = full.read_text()
+            except Exception:
+                filtered.append(sf)
+                continue
+            cached = cache.get(sf, content)
+            if cached and cached.get("recheck_verdict") == "drop":
+                continue
+            prompt = RECHECK_PROMPT.format(file_path=sf, content=content[:3000])
+            response = _invoke_agent("analyzer", prompt)
+            if response:
+                try:
+                    verdict = json.loads(response.split("\n")[0])
+                    if verdict.get("verdict") == "drop":
+                        cache.put(sf, content, True,
+                                 cached["reason"] if cached else "strategy file",
+                                 recheck_verdict="drop",
+                                 recheck_reason=verdict.get("reason", ""))
+                        continue
+                except Exception:
+                    pass
+            filtered.append(sf)
+        strategy_files = filtered
+
     console.print(f"扫描完成: {len(all_files)} 个文件, {len(strategy_files)} 个策略密集文件")
 
     # ------- Layer 2: Analyze -------
@@ -445,6 +530,12 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str,
             llm = get_llm()
         except Exception:
             pass
+
+        # Generate project context for agent injection
+        ctx = load_project_context(workspace)
+        if not ctx:
+            ctx = generate_project_context(str(source_path), workspace, llm)
+            ctx = merge_manual_context(str(source_path), ctx)
 
         wb = run_dialogue_loop(workspace, wb, llm_adapter=llm)
         console.print(f"\n[bold green]分析会话结束。[/bold green]")

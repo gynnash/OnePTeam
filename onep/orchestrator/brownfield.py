@@ -67,6 +67,48 @@ ANALYZE_PROMPT = """请对以下策略密集文件进行深度分析，发现可
 只输出 JSON，每行一个对象，不要其他内容。"""
 
 
+SCAN_PROMPT_FULL = """请分析以下文件内容，判定是否包含业务策略或算法策略逻辑。
+
+策略逻辑包括：
+- 推荐算法、排序算法、匹配算法
+- LLM prompt 链、Agent 工作流、模型路由
+- 缓存策略、限流策略、资源分配策略
+- 业务规则、定价策略、风控规则、风险评分
+- 任何影响系统行为的非平凡决策逻辑
+
+不属于策略逻辑：
+- 纯工具函数（字符串处理、日期格式化）
+- 配置常量或枚举
+- 简单 CRUD（无决策逻辑）
+- 样板代码（中间件、日志、路由注册）
+- 测试文件
+
+文件内容:
+{file_block}
+
+对每个文件输出一行 JSON：
+{{"file": "<path>", "is_strategy": true/false, "reason": "<一句话理由>", ""}}
+
+只输出 JSON，每行一个文件，不要其他内容。"""
+
+
+RECHECK_PROMPT = """判定以下文件是否有值得优化的策略逻辑。
+
+文件: {file_path}
+内容:
+```
+{content}
+```
+
+输出一行 JSON：
+{{"verdict": "keep" | "drop", "reason": "<一句话>"}}
+
+drop 的情况：
+- 虽然有策略关键词但实现已合理
+- 纯样板代码被误标为策略
+- 决策逻辑简单清晰无优化空间"""
+
+
 def build_brownfield_tasks(project: Project, state: PipelineState) -> list[Task]:
     """Build CrewAI Task list for the Brownfield pipeline."""
     tasks = []
