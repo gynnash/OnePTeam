@@ -45,7 +45,13 @@ console = Console()
 @click.option("--name", "-n", default=None, help="Project name")
 @click.option("--max-cost", type=float, default=0,
               help="Maximum cost in USD (0 = no limit)")
-def analyze_cmd(source: str, mode: str, name: str | None, max_cost: float = 0):
+@click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+@click.option("--from-layer", "from_layer", type=click.Choice(["1", "2", "3"]),
+              default=None, help="Start from specific layer")
+@click.option("--no-dialogue", is_flag=True, help="Skip interactive dialogue")
+def analyze_cmd(source: str, mode: str, name: str | None, max_cost: float = 0,
+                resume: bool = False, from_layer: str | None = None,
+                no_dialogue: bool = False):
     """Analyze a codebase for strategy optimizations.
 
     SOURCE can be a local path or a git repository URL.
@@ -63,7 +69,9 @@ def analyze_cmd(source: str, mode: str, name: str | None, max_cost: float = 0):
     insert_project(project)
     console.print(f"[bold]Source:[/bold] {source_path}\n[bold]Workspace:[/bold] {workspace}")
     if mode == "strategy":
-        _run_strategy_mode(source_path, workspace, name, max_cost=max_cost)
+        _run_strategy_mode(source_path, workspace, name,
+                          from_layer=from_layer, max_cost=max_cost,
+                          resume=resume, no_dialogue=no_dialogue)
     else:
         console.print(f"[yellow]Mode '{mode}' not yet implemented.[/yellow]")
 
@@ -223,8 +231,28 @@ def _invoke_agent_with_tools(
         return _invoke_agent(agent_name, user_prompt, workspace, source_id)
 
 
-def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str, from_layer: str | None = None, max_cost: float = 0) -> None:
+def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str,
+                      from_layer: str | None = None, max_cost: float = 0,
+                      resume: bool = False, no_dialogue: bool = False) -> None:
     tracker = CostTracker(budget=max_cost)
+
+    # Resume from checkpoint
+    if resume:
+        pstate = PipelineState.load(str(workspace))
+        if pstate is None:
+            console.print("[red]No checkpoint found to resume from.[/red]")
+            return
+        if pstate.status == Status.FAILED:
+            console.print(f"[yellow]从失败状态恢复: {pstate.error}[/yellow]")
+            # Re-enter at the failed layer
+            if pstate.current_layer == "scan":
+                from_layer = "1"
+            elif pstate.current_layer == "analyze":
+                from_layer = "2"
+        elif pstate.status in (Status.SCAN_DONE,):
+            from_layer = "2"
+        elif pstate.status in (Status.ANALYZE_DONE,):
+            from_layer = "3"
 
     # Handle from_layer
     if from_layer == "2" or from_layer == "3":
@@ -404,18 +432,23 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str, fr
     console.print(f"[dim]当前花费: {tracker.summary()}[/dim]")
 
     # ------- Layer 3: Dialogue -------
-    console.print(f"\n[bold cyan]=== Layer 3: 交互式对话 ===[/bold cyan]")
+    if no_dialogue:
+        console.print(f"\n[bold green]分析完成。[/bold green]")
+        console.print(f"导出报告: [bold cyan]onep export {project_name}[/bold cyan]")
+        pstate.complete_layer(Layer.DIALOGUE)
+    else:
+        console.print(f"\n[bold cyan]=== Layer 3: 交互式对话 ===[/bold cyan]")
 
-    llm = None
-    try:
-        from onep.llm.adapters import get_llm
-        llm = get_llm()
-    except Exception:
-        pass
+        llm = None
+        try:
+            from onep.llm.adapters import get_llm
+            llm = get_llm()
+        except Exception:
+            pass
 
-    wb = run_dialogue_loop(workspace, wb, llm_adapter=llm)
-    console.print(f"\n[bold green]分析会话结束。[/bold green]")
-    console.print(f"恢复: [bold cyan]onep strategy resume {project_name}[/bold cyan]")
+        wb = run_dialogue_loop(workspace, wb, llm_adapter=llm)
+        console.print(f"\n[bold green]分析会话结束。[/bold green]")
+        console.print(f"恢复: [bold cyan]onep strategy resume {project_name}[/bold cyan]")
 
 
 def _no_llm_scan_result(file_path: str):
