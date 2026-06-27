@@ -66,7 +66,7 @@ def build_brownfield_tasks(project: Project, state: PipelineState) -> list[Task]
         task = Task(
             description=f"Execute {stage['name']} for project {project.name}",
             expected_output=f"Stage {stage['name']} completed.",
-            agent=get_agent(stage["agent"]),
+            agent=get_agent(stage["agent"], workspace=str(project.workspace_path)),
         )
         tasks.append(task)
     return tasks

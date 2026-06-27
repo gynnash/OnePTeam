@@ -1,55 +1,46 @@
-"""Git operations via GitPython."""
+"""Git operations compatible with CrewAI agents."""
 from __future__ import annotations
 
-from pathlib import Path
 import git
-
-from onep.tools.base import BaseTool
+from crewai.tools import BaseTool
 
 
 class GitTool(BaseTool):
-    name = "git"
-    description = "Git operations scoped to a workspace."
+    name: str = "git"
+    description: str = "Run git operations: status, log, diff, commit. Workspace must be a git repository."
 
-    def __init__(self, workspace: Path):
-        self.workspace = workspace
+    workspace: str = ""
 
-    def _repo(self) -> git.Repo:
-        return git.Repo(str(self.workspace))
+    def _run(self, operation: str, message: str = "", paths: str = ".") -> str:
+        """Run a git operation.
 
-    def init(self) -> str:
-        repo = git.Repo.init(str(self.workspace))
-        return str(repo.working_dir)
+        Args:
+            operation: One of status, log, diff, commit, add
+            message: Commit message (required for commit)
+            paths: File paths to stage (for add/commit)
+        """
+        repo = git.Repo(self.workspace)
+        op = operation.lower()
 
-    def add(self, paths: list[str]) -> str:
-        repo = self._repo()
-        repo.index.add(paths)
-        return f"Staged: {paths}"
+        if op == "status":
+            return repo.git.status()
 
-    def commit(self, message: str) -> str:
-        repo = self._repo()
-        commit = repo.index.commit(message)
-        return f"Commit: {commit.hexsha[:8]} - {message}"
+        if op == "log":
+            commits = list(repo.iter_commits(max_count=10))
+            lines = [f"{c.hexsha[:8]} {c.message.split(chr(10))[0]}" for c in commits]
+            return "\n".join(lines) if lines else "(no commits)"
 
-    def status(self) -> str:
-        repo = self._repo()
-        return repo.git.status()
+        if op == "diff":
+            return repo.git.diff() or "(no changes)"
 
-    def log(self, max_count: int = 10) -> str:
-        repo = self._repo()
-        commits = list(repo.iter_commits(max_count=max_count))
-        return "\n".join(f"{c.hexsha[:8]} {c.message.split(chr(10))[0]}" for c in commits)
+        if op == "add":
+            repo.index.add([p.strip() for p in paths.split(",")])
+            return f"Staged: {paths}"
 
-    def run(self, **kwargs):
-        operation = kwargs.get("operation", "status")
-        if operation == "init":
-            return self.init()
-        elif operation == "add":
-            return self.add(kwargs.get("paths", ["."]))
-        elif operation == "commit":
-            return self.commit(kwargs["message"])
-        elif operation == "status":
-            return self.status()
-        elif operation == "log":
-            return self.log()
-        raise ValueError(f"Unknown operation: {operation}")
+        if op == "commit":
+            if not message:
+                return "Error: commit requires a message"
+            commit = repo.index.commit(message)
+            return f"Commit: {commit.hexsha[:8]} - {message}"
+
+        return f"Unknown operation: {operation}. Available: status, log, diff, commit, add"

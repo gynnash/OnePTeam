@@ -34,7 +34,7 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
 
     workspace = Path(project.workspace_path)
     state = load_state(workspace)
-    git = GitTool(workspace=workspace)
+    git = GitTool(workspace=str(workspace))
 
     project.status = ProjectStatus.RUNNING
     project.touch()
@@ -92,7 +92,7 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
             workspace=str(workspace),
         )
 
-        system_prompt = _build_agent_system_prompt(stage["agent"])
+        system_prompt = _build_agent_system_prompt(stage["agent"], workspace=str(workspace))
 
         # ----- invoke LLM -----
         try:
@@ -128,8 +128,8 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
         update_stage_run(stage_run)
 
         if _has_uncommitted_changes(git):
-            git.add(["."])
-            git.commit(f"feat: {stage_name} stage completed — {stage['description']}")
+            git.run(operation="add", paths=".")
+            git.run(operation="commit", message=f"feat: {stage_name} stage completed — {stage['description']}")
 
         state.stages_completed.append(stage_name)
         state.current_stage = ""
@@ -156,9 +156,9 @@ def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
     return True
 
 
-def _build_agent_system_prompt(agent_name: str) -> str:
+def _build_agent_system_prompt(agent_name: str, workspace: str = "") -> str:
     """Build a system prompt from an agent's registered role, goal, and backstory."""
-    agent = get_agent(agent_name)
+    agent = get_agent(agent_name, workspace=workspace)
     return (
         f"{agent.role}\n\n"
         f"目标: {agent.goal}\n\n"
@@ -259,5 +259,5 @@ def _has_uncommitted_changes(git: GitTool) -> bool:
         repo = gitpython.Repo(str(git.workspace))
         return repo.is_dirty(untracked_files=True)
     except Exception:
-        status = git.status()
+        status = git.run(operation="status")
         return "nothing to commit" not in status and "nothing added to commit" not in status

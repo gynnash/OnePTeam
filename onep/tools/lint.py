@@ -1,35 +1,30 @@
-"""Basic code quality checks."""
+"""Code linting compatible with CrewAI agents."""
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 
-from onep.tools.base import BaseTool
+from crewai.tools import BaseTool
 
 
 class LintTool(BaseTool):
-    name = "lint"
-    description = "Run linting and basic code quality checks."
+    name: str = "lint"
+    description: str = "Run ruff lint checks on Python code in the workspace."
 
-    def __init__(self, workspace: Path):
-        self.workspace = workspace
+    workspace: str = ""
 
-    def check_python(self, path: str = ".") -> str:
-        """Run ruff or flake8 on Python files."""
+    def _run(self, path: str = ".") -> str:
+        """Run ruff linter on the given path.
+
+        Args:
+            path: Relative path within workspace to lint (default: entire workspace)
+        """
         try:
             result = subprocess.run(
                 ["ruff", "check", path, "--output-format=text"],
-                capture_output=True, text=True, cwd=str(self.workspace), timeout=60,
+                capture_output=True, text=True, cwd=self.workspace, timeout=60,
             )
             if result.returncode == 0:
-                return "No issues found.\n" + result.stdout
-            return result.stdout + "\n" + result.stderr
+                return "No issues found.\n" + (result.stdout or "")
+            return (result.stdout + "\n" + result.stderr) or "Lint issues found."
         except FileNotFoundError:
             return "Lint skipped: ruff not installed."
-
-    def run(self, **kwargs):
-        language = kwargs.get("language", "python")
-        path = kwargs.get("path", ".")
-        if language == "python":
-            return self.check_python(path)
-        return f"Lint not supported for: {language}"

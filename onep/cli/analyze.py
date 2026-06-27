@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 
 import click
+from crewai import Task, Crew, Process
 from rich.console import Console
 
 from onep.config import load_config
@@ -64,9 +65,9 @@ def _resolve_source(source: str) -> Path:
     return Path(source).resolve()
 
 
-def _build_agent_system_prompt(agent_name: str) -> str:
+def _build_agent_system_prompt(agent_name: str, workspace: str = "") -> str:
     """Build a system prompt from an agent's registered role, goal, and backstory."""
-    agent = get_agent(agent_name)
+    agent = get_agent(agent_name, workspace=workspace)
     return f"""{agent.role}
 
 目标: {agent.goal}
@@ -76,19 +77,40 @@ def _build_agent_system_prompt(agent_name: str) -> str:
 请按照用户指令完成工作，只输出要求的内容，不要额外解释。"""
 
 
-def _invoke_agent(agent_name: str, user_prompt: str) -> str | None:
-    """Invoke an agent via the LLM adapter with its full persona as system prompt."""
+def _invoke_agent(agent_name: str, user_prompt: str, workspace: str = "") -> str | None:
+    """Invoke an agent via raw LLM call (no tools). For simple classification tasks."""
     try:
         from onep.llm.adapters import get_llm
         llm = get_llm()
         return llm.invoke(
-            system_prompt=_build_agent_system_prompt(agent_name),
+            system_prompt=_build_agent_system_prompt(agent_name, workspace),
             user_prompt=user_prompt,
             stage_name=agent_name,
         )
     except Exception as e:
         console.print(f"[yellow]LLM 调用失败: {e}[/yellow]")
         return None
+
+
+def _invoke_agent_with_tools(agent_name: str, user_prompt: str, workspace: str = "") -> str | None:
+    """Invoke an agent via CrewAI with tool calling enabled.
+
+    The agent can read files, list directories, and use other registered tools
+    to complete the task. Falls back to raw invoke if CrewAI execution fails.
+    """
+    try:
+        agent = get_agent(agent_name, workspace=workspace)
+        task = Task(
+            description=user_prompt,
+            expected_output="完成后输出最终结果。",
+            agent=agent,
+        )
+        crew = Crew(agents=[agent], tasks=[task], process=Process.sequential, verbose=False)
+        result = crew.kickoff()
+        return str(result) if result else None
+    except Exception as e:
+        console.print(f"[yellow]CrewAI 工具调用失败，回退到裸调: {e}[/yellow]")
+        return _invoke_agent(agent_name, user_prompt, workspace)
 
 
 def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str) -> None:
@@ -129,7 +151,7 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str) ->
             file_list="\n".join(f"- {f}" for f in strategy_files),
             source_root=str(source_path),
         )
-        response = _invoke_agent("strategy_architect", prompt)
+        response = _invoke_agent_with_tools("strategy_architect", prompt, workspace=str(source_path))
         items = parse_analysis_response(response) if response else _no_llm_items()
     else:
         items = [

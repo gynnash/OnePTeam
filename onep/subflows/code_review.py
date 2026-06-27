@@ -20,8 +20,8 @@ class CodeReviewState(TypedDict):
 def lint_code(state: CodeReviewState) -> CodeReviewState:
     from onep.tools.lint import LintTool
     ws = Path(state["workspace"])
-    tool = LintTool(workspace=ws)
-    output = tool.check_python()
+    tool = LintTool(workspace=str(ws))
+    output = tool.run(path=".")
     state["lint_output"] = output
     state["passed"] = "No issues found" in output
     return state

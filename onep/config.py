@@ -8,14 +8,16 @@ from dataclasses import dataclass, field
 
 import yaml
 
-# Load .env file from project root if present
-_ENV_PATH = Path.cwd() / ".env"
-if _ENV_PATH.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_ENV_PATH)
-    except ImportError:
-        pass
+# Load .env file if present — check cwd first, then package project root
+_env_candidates = [Path.cwd() / ".env", Path(__file__).resolve().parent.parent / ".env"]
+for _ENV_PATH in _env_candidates:
+    if _ENV_PATH.exists():
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(_ENV_PATH)
+        except ImportError:
+            pass
+        break
 
 
 @dataclass

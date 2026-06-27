@@ -2,10 +2,19 @@
 from crewai import Agent
 
 from onep.agents.registry import register
+from onep.tools.filesystem import FileReadTool, FileWriteTool, FileListTool
 
 
 @register("architect")
-def create_architect() -> Agent:
+def create_architect(workspace: str = "") -> Agent:
+    tools = []
+    if workspace:
+        tools = [
+            FileReadTool(workspace=workspace),
+            FileWriteTool(workspace=workspace),
+            FileListTool(workspace=workspace),
+        ]
+
     return Agent(
         role="架构师",
         goal="基于 PRD 和 UI 设计稿，设计系统架构、数据模型、API 契约和技术选型",
@@ -15,7 +24,10 @@ def create_architect() -> Agent:
             "你设计 RESTful API、数据库 Schema (SQL/NoSQL)、组件树和中间件策略。"
             "你输出结构化的 ARCHITECTURE.md、Mermaid 架构图和 API 文档。"
             "你始终考虑可扩展性、安全性和性能。"
+            "你可以使用 file_read 读取 PRD 和设计文档，用 file_write 输出架构文档，"
+            "用 file_list 浏览项目目录结构。"
         ),
+        tools=tools,
         verbose=True,
         allow_delegation=False,
         max_iter=5,

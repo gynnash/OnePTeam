@@ -18,12 +18,12 @@ def register(name: str) -> Callable[[AgentFactory], AgentFactory]:
     return decorator
 
 
-def get_agent(name: str) -> Agent:
-    """Get a CrewAI Agent instance by name."""
+def get_agent(name: str, **kwargs) -> Agent:
+    """Get a CrewAI Agent instance by name. Extra kwargs are passed to the factory."""
     factory = _registry.get(name)
     if factory is None:
         raise KeyError(f"Agent '{name}' not registered. Available: {list(_registry.keys())}")
-    return factory()
+    return factory(**kwargs)
 
 
 def list_agents() -> list[str]:

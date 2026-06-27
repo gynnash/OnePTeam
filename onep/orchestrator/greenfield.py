@@ -138,7 +138,7 @@ def build_greenfield_tasks(project: Project, state: PipelineState) -> list[Task]
         task = Task(
             description=prompt,
             expected_output=f"Stage {stage['name']} completed. Output saved to workspace.",
-            agent=get_agent(stage["agent"]),
+            agent=get_agent(stage["agent"], workspace=str(workspace)),
         )
         tasks.append(task)
 

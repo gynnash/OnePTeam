@@ -24,25 +24,25 @@ def test_config_loads():
 
 def test_all_agents_registered():
     clear_registry()
-    import onep.agents.pm
-    import onep.agents.designer
-    import onep.agents.architect
-    import onep.agents.developer
-    import onep.agents.tester
-    import onep.agents.devops
+    import sys
+    for mod_name in ["onep.agents.pm", "onep.agents.designer", "onep.agents.architect",
+                     "onep.agents.developer", "onep.agents.tester", "onep.agents.devops",
+                     "onep.agents.analyzer", "onep.agents.strategy_architect"]:
+        importlib.reload(sys.modules[mod_name])
 
     agents = list_agents()
-    for name in ["pm", "designer", "architect", "developer", "tester", "devops"]:
+    for name in ["pm", "designer", "architect", "developer", "tester", "devops", "analyzer", "strategy_architect"]:
         assert name in agents, f"Agent {name} not registered"
 
 
 def test_agent_instantiation():
     clear_registry()
     for mod_name in ["onep.agents.pm", "onep.agents.designer", "onep.agents.architect",
-                     "onep.agents.developer", "onep.agents.tester", "onep.agents.devops"]:
+                     "onep.agents.developer", "onep.agents.tester", "onep.agents.devops",
+                     "onep.agents.analyzer", "onep.agents.strategy_architect"]:
         importlib.reload(importlib.import_module(mod_name))
 
-    for name in ["pm", "designer", "architect", "developer", "tester", "devops"]:
+    for name in ["pm", "designer", "architect", "developer", "tester", "devops", "analyzer", "strategy_architect"]:
         agent = get_agent(name)
         assert agent.role is not None
         assert agent.goal is not None

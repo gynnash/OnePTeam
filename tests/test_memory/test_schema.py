@@ -18,11 +18,12 @@ def test_init_is_idempotent(tmp_path):
     init_memory_db(db_path)
     init_memory_db(db_path)  # should not raise
 
-def test_get_connection_returns_singleton(tmp_path):
+def test_get_connection_returns_singleton(tmp_path, monkeypatch):
     db_path = str(tmp_path / "memory.db")
+    monkeypatch.setattr("onep.memory.schema.MEMORY_DB_PATH", db_path)
     init_memory_db(db_path)
-    c1 = get_connection()
-    c2 = get_connection()
+    c1 = get_connection(db_path)
+    c2 = get_connection(db_path)
     assert c1 is c2
 
 def test_schema_migration_adds_columns(tmp_path):

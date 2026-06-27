@@ -48,7 +48,7 @@ def init_memory_db(db_path: str = MEMORY_DB_PATH) -> None:
             conn.execute(index_sql)
         except sqlite3.OperationalError:
             pass
-    # FTS5 may fail if compiled without it — not fatal
+    # FTS5 may fail if SQLite compiled without it — not fatal
     try:
         conn.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -57,7 +57,7 @@ def init_memory_db(db_path: str = MEMORY_DB_PATH) -> None:
                 content_rowid='rowid'
             )
         """)
-    except Exception:
+    except sqlite3.OperationalError:
         pass
     conn.commit()
     conn.close()

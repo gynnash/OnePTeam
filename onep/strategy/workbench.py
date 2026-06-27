@@ -19,8 +19,26 @@ SLASH_COMMANDS = {
     "list": "list", "focus": "focus", "search": "search",
     "plan": "plan", "expand": "expand", "compare": "compare",
     "merge": "merge", "discard": "discard", "save": "save",
-    "status": "status", "exit": "exit",
+    "status": "status", "read": "read", "ls": "ls",
+    "help": "help", "exit": "exit",
 }
+
+HELP_TEXT = """\
+[bold]可用命令:[/bold]
+  [bold]/list[/bold]                查看所有优化方向
+  [bold]/focus[/bold] <n>           切换到第 n 个方向进行讨论
+  [bold]/search[/bold] <keyword>    按关键词搜索方向
+  [bold]/plan[/bold] <n>            为第 n 个方向生成标准版优化 Plan
+  [bold]/expand[/bold] <n>          为标准版 Plan 生成完整实施方案
+  [bold]/compare[/bold] <n> <m>     对比两个方向
+  [bold]/merge[/bold] <n> <m>       合并两个方向为一个
+  [bold]/discard[/bold] <n>         忽略/丢弃某个方向
+  [bold]/read[/bold] <file>         读取源码树中的文件
+  [bold]/ls[/bold] <dir>            列出源码树目录内容
+  [bold]/status[/bold]              查看当前分析进度
+  [bold]/save[/bold]                保存工作台
+  [bold]/help[/bold]                显示此帮助
+  [bold]/exit[/bold]                保存并退出"""
 
 
 def parse_input(user_input: str) -> tuple[str | None, str | None, str]:
@@ -80,11 +98,17 @@ def handle_slash_command(
             if item:
                 item.discard()
                 console.print(f"[yellow]已忽略: [{item_id}] {item.title}[/yellow]")
+    elif cmd == "read":
+        _cmd_read(args, wb)
+    elif cmd == "ls":
+        _cmd_ls(args, wb)
     elif cmd == "save":
         save_workbench(workspace, wb)
         console.print("[green]工作台已保存。[/green]")
     elif cmd == "status":
         _cmd_status(wb)
+    elif cmd == "help":
+        console.print(HELP_TEXT)
     elif cmd == "exit":
         save_workbench(workspace, wb)
         console.print(f"[green]工作台已保存。恢复会话: onep strategy resume {wb.project_name}[/green]")
@@ -150,6 +174,44 @@ def _cmd_status(wb: WorkbenchState) -> None:
                        ("分析完成", "✓" if wb.analysis_complete else "○")]:
         table.add_row(label, val)
     console.print(table)
+
+
+def _cmd_read(args: str, wb: WorkbenchState) -> None:
+    """Read a file from the source tree and display it."""
+    file_path = args.strip() or (wb.current_item.file_location.split(":")[0] if wb.current_item else "")
+    if not file_path:
+        console.print("[red]用法: /read <file> 或先用 /focus 选择一个方向[/red]")
+        return
+    full = Path(wb.source_path) / file_path
+    if not full.exists():
+        console.print(f"[red]文件不存在: {file_path}[/red]")
+        return
+    content = full.read_text()
+    max_lines = 200
+    lines = content.split("\n")
+    if len(lines) > max_lines:
+        content = "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
+    console.print(Panel(content, title=f"📄 {file_path}", border_style="dim"))
+
+
+def _cmd_ls(args: str, wb: WorkbenchState) -> None:
+    """List files in the source tree directory."""
+    dir_path = args.strip() or "."
+    full = (Path(wb.source_path) / dir_path).resolve()
+    if not str(full).startswith(str(Path(wb.source_path).resolve())):
+        console.print(f"[red]路径超出源码范围: {dir_path}[/red]")
+        return
+    if not full.exists():
+        console.print(f"[red]目录不存在: {dir_path}[/red]")
+        return
+    items = sorted(full.iterdir(), key=lambda p: (not p.is_dir(), p.name))
+    lines = []
+    for p in items:
+        suffix = "/" if p.is_dir() else ""
+        lines.append(f"  {'📁' if p.is_dir() else '📄'} {p.name}{suffix}")
+    console.print(f"[bold]{dir_path}/[/bold]\n" + "\n".join(lines[:50]))
+    if len(items) > 50:
+        console.print(f"[dim]... 还有 {len(items) - 50} 个条目[/dim]")
 
 
 def _cmd_generate_plan(args: str, wb: WorkbenchState, workspace: Path, llm_adapter=None, version: str = "standard") -> None:
@@ -219,6 +281,21 @@ def _higher_impact(a: str, b: str) -> str:
     return a if order.get(a, 0) >= order.get(b, 0) else b
 
 
+def _read_item_file(source_path: str, file_location: str) -> str | None:
+    """Read the file referenced by a StrategyItem, truncated to a reasonable size."""
+    file_part = file_location.split(":")[0]
+    file_path = Path(source_path) / file_part
+    if not file_path.exists():
+        return None
+    try:
+        content = file_path.read_text()
+        if len(content) > 3000:
+            content = content[:3000] + "\n... (文件过长，已截断)"
+        return content
+    except Exception:
+        return None
+
+
 def _build_dialogue_context(wb: WorkbenchState, user_message: str) -> str:
     current_item = _find_item(wb, wb.current_item_id) if wb.current_item_id else None
     context_parts = [f"项目: {wb.project_name}", f"源路径: {wb.source_path}"]
@@ -228,6 +305,10 @@ def _build_dialogue_context(wb: WorkbenchState, user_message: str) -> str:
         context_parts.append(f"问题摘要: {current_item.summary}")
         context_parts.append(f"标签: {', '.join(current_item.tags)}")
         context_parts.append(f"影响: {current_item.impact}")
+
+        file_content = _read_item_file(wb.source_path, current_item.file_location)
+        if file_content:
+            context_parts.append(f"\n相关代码:\n```\n{file_content}\n```")
     recent = wb.dialogue[-10:] if wb.dialogue else []
     if recent:
         context_parts.append("\n最近对话:")
@@ -245,7 +326,7 @@ def run_dialogue_loop(workspace: Path, wb: WorkbenchState, llm_adapter=None) -> 
         f"输入自然语言与Agent讨论，或使用 / 命令操作",
         title="Strategy Workbench",
     ))
-    console.print("输入 [bold]/list[/bold] 查看所有方向，[bold]/exit[/bold] 退出\n")
+    console.print(HELP_TEXT + "\n")
 
     while True:
         try:
@@ -274,14 +355,23 @@ def run_dialogue_loop(workspace: Path, wb: WorkbenchState, llm_adapter=None) -> 
             ))
             if llm_adapter is not None:
                 context = _build_dialogue_context(wb, message)
-                response = llm_adapter.invoke(
-                    system_prompt="你是一位策略架构师，正在与用户讨论代码策略优化。根据用户的问题提供有帮助的深入分析。回答要具体，引用代码中的实际策略逻辑。用中文回复。",
-                    user_prompt=context, stage_name="strategy_architect",
-                )
-                console.print(f"\n[bold green]🧠 Strategy Architect:[/bold green] {response}\n")
-                append_dialogue(workspace, DialogueTurn(
-                    role="agent", content=response, item_id=wb.current_item_id,
-                ))
+                console.print(f"\n[bold green]🧠 Strategy Architect:[/bold green] ", end="")
+                response_parts: list[str] = []
+                try:
+                    for token in llm_adapter.invoke_stream(
+                        system_prompt="你是一位策略架构师，正在与用户讨论代码策略优化。根据用户的问题提供有帮助的深入分析。回答要具体，引用代码中的实际策略逻辑。用中文回复。",
+                        user_prompt=context, stage_name="strategy_architect",
+                    ):
+                        console.print(token, end="")
+                        response_parts.append(token)
+                except Exception:
+                    pass
+                console.print("\n")
+                response = "".join(response_parts)
+                if response:
+                    append_dialogue(workspace, DialogueTurn(
+                        role="agent", content=response, item_id=wb.current_item_id,
+                    ))
             else:
                 console.print("\n[yellow]LLM 不可用（请配置 API 密钥）。Slash 命令仍然可用。[/yellow]\n")
     return wb

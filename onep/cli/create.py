@@ -37,12 +37,11 @@ def create_cmd(requirement: str, name: str | None):
     workspace = projects_dir / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
-    git = GitTool(workspace=workspace)
-    git.init()
+    git = GitTool(workspace=str(workspace))
     (workspace / "docs").mkdir(exist_ok=True)
     (workspace / "README.md").write_text(f"# {name}\n\n{requirement}\n")
-    git.add(["README.md"])
-    git.commit("chore: initial commit from onep create")
+    git.run(operation="add", paths="README.md")
+    git.run(operation="commit", message="chore: initial commit from onep create")
 
     project = Project(
         name=name,

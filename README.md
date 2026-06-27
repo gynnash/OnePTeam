@@ -53,22 +53,35 @@ OPENAI_API_BASE=https://api.openai.com/v1
 
 环境变量优先级高于配置文件，推荐使用 `.env` 管理密钥。
 
-#### 模型配置（config.yaml）
+#### 模型配置（~/.onep/config.yaml）
 
-首次运行会自动创建 `~/.onep/config.yaml`，模型路由和 Pipeline 参数在此配置：
+首次运行会自动创建 `~/.onep/config.yaml`。模型路由规则：
+
+| 任务类型 | 使用模型 | 涵盖的 Agent |
+|---------|---------|------------|
+| 复杂任务 | `complex_model` | 产品经理、UI/UX 设计师、架构师、策略架构师 |
+| 常规任务 | `default_model` | 研发工程师、测试工程师、DevOps 工程师、代码分析师 |
 
 ```yaml
 llm:
+  # 常规任务（代码生成、测试、部署、扫描）
   default_model: deepseek/deepseek-chat
   default_provider: deepseek
-  complex_model: openai/gpt-5.5
+
+  # 复杂任务（需求分析、设计、架构、策略分析）
+  complex_model: openai/gpt-4o
   complex_provider: openai
-  # api_key 和 api_base 推荐通过 .env 环境变量注入，不要写在这里
+
+  # 可选：为特定 Provider 配置额外模型
+  models: {}
 
 pipeline:
-  auto_approve: false
-  max_retries: 3
+  auto_approve: false     # 是否跳过人工审核点
+  max_retries: 3           # 测试/部署失败最大重试次数
+  test_timeout: 300        # 测试超时（秒）
 ```
+
+> **模型名格式**: `provider/model-name`，如 `openai/gpt-4o`、`openai/gpt-4.1`、`deepseek/deepseek-chat`、`deepseek/deepseek-v4-pro`。
 
 > **安全提示：** 不要在 `config.yaml` 中写入 API 密钥，也不要把 `.env` 文件提交到 Git。密钥统一通过环境变量管理。
 
@@ -121,14 +134,14 @@ onep strategy export my-analysis -f json  # JSON 格式
 
 | 角色 | 模型 | 职责 |
 |------|------|------|
-| 📋 产品经理 | GPT 5.5 | 需求分析 → 用户故事 → 功能规格 → PRD |
-| 🎨 UI/UX 设计师 | GPT 5.5 | 页面布局 → 交互流程 → 组件选型 → 视觉规范 |
-| 📐 架构师 | GPT 5.5 | 系统架构 → 数据模型 → API 契约 → 技术选型 |
-| 💻 研发工程师 | DeepSeek V4 | 后端 API + 前端页面 + Docker 配置 |
-| 🧪 测试工程师 | DeepSeek V4 | 单元测试 + 集成测试 + 测试报告 |
-| 🚀 DevOps 工程师 | DeepSeek V4 | Docker 部署 + 健康检查 + 部署日志 |
-| 🔍 代码分析师 | DeepSeek V4 | 文件扫描 → 策略密集度识别 |
-| 🏗️ 策略架构师 | GPT 5.5 | 深度分析 → 优化方向识别 → Plan 生成 |
+| 📋 产品经理 | 复杂模型 | 需求分析 → 用户故事 → 功能规格 → PRD |
+| 🎨 UI/UX 设计师 | 复杂模型 | 页面布局 → 交互流程 → 组件选型 → 视觉规范 |
+| 📐 架构师 | 复杂模型 | 系统架构 → 数据模型 → API 契约 → 技术选型 |
+| 💻 研发工程师 | 默认模型 | 后端 API + 前端页面 + Docker 配置 |
+| 🧪 测试工程师 | 默认模型 | 单元测试 + 集成测试 + 测试报告 |
+| 🚀 DevOps 工程师 | 默认模型 | Docker 部署 + 健康检查 + 部署日志 |
+| 🔍 代码分析师 | 默认模型 | 文件扫描 → 策略密集度识别 |
+| 🏗️ 策略架构师 | 复杂模型 | 深度分析 → 优化方向识别 → Plan 生成 |
 
 ## 流水线
 
