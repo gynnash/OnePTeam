@@ -15,12 +15,12 @@ from rich.console import Console
 from onep.config import load_config
 from onep.persistence.database import init_db, insert_project
 from onep.persistence.models import Project, ProjectMode
-from onep.strategy.models import WorkbenchState
+from onep.strategy.models import WorkbenchState, StrategyItem
 from onep.strategy.scanner import walk_files, batch_files, parse_scan_response, get_strategy_files
 from onep.strategy.scanner import save_batch_results, load_batch_results, get_completed_batch_indices
 from onep.strategy.pipeline_state import PipelineState, Layer, Status
 from onep.strategy.retry import retry_with_backoff
-from onep.strategy.analyzer import parse_analysis_response
+from onep.strategy.analyzer import parse_analysis_response, parse_streaming_items, save_analysis_items, load_analysis_items
 from onep.strategy.persistence import save_workbench
 from onep.memory import hooks as memory_hooks
 from onep.memory.context import (
@@ -170,6 +170,7 @@ def _invoke_agent_with_tools(
     user_prompt: str,
     workspace: str = "",
     source_id: str = "",
+    stream_callback: callable = None,
 ) -> str | None:
     """Invoke an agent with streaming tool calling.
 
@@ -206,6 +207,8 @@ def _invoke_agent_with_tools(
             elif event["type"] == "token":
                 console.print(event["content"], end="")
                 response_parts.append(event["content"])
+                if stream_callback:
+                    stream_callback(event["content"])
             elif event["type"] == "done":
                 pass
 
@@ -307,41 +310,75 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str, fr
     console.print("\n[bold cyan]=== Layer 2: 深度分析 ===[/bold cyan]")
     console.print("[dim]策略架构师 Agent 分析中...[/dim]")
 
-    if strategy_files:
-        prompt = ANALYZE_PROMPT.format(
-            file_list="\n".join(f"- {f}" for f in strategy_files),
-            source_root=str(source_path),
-        )
-        prompt = _append_analysis_memory(
-            prompt,
-            "strategy_architect",
-            project_name,
-            f"{project_name} 策略优化 " + " ".join(strategy_files),
-        )
-        response = _invoke_agent_with_tools(
-            "strategy_architect",
-            prompt,
-            workspace=str(source_path),
-            source_id=f"brownfield:{project_name}",
-        )
-        # Track cost after analyze LLM invoke
-        if max_cost > 0:
-            llm = get_llm()
-            if not llm.usage.is_empty:
-                tracker.add_usage(llm.usage.prompt_tokens, llm.usage.completion_tokens,
-                                  resolve_model("strategy_architect")[0])
-                if not tracker.can_continue():
-                    console.print(f"[red]预算超限 ({tracker.summary()})，已停止[/red]")
-                    pstate.total_cost = tracker.spent
-                    pstate.save()
-                    return
-        items = parse_analysis_response(response) if response else _no_llm_items()
+    # Check if analysis already done
+    existing_items_raw = load_analysis_items(workspace)
+    if existing_items_raw and pstate.status in (Status.ANALYZE_DONE, Status.DIALOGUE_ACTIVE, Status.COMPLETED):
+        console.print(f"[dim]分析已完成，加载 {len(existing_items_raw)} 个已保存的优化方向[/dim]")
+        items = [StrategyItem(**d) for d in existing_items_raw]
     else:
-        items = [
-            _no_llm_item("未发现策略密集文件，建议检查代码库内容或手动指定分析范围。")
-        ]
+        pstate.start_layer(Layer.ANALYZE)
+        strategy_files = get_strategy_files(all_results)
+        if strategy_files:
+            prompt = ANALYZE_PROMPT.format(
+                file_list="\n".join(f"- {f}" for f in strategy_files),
+                source_root=str(source_path),
+            )
+            prompt = _append_analysis_memory(
+                prompt,
+                "strategy_architect",
+                project_name,
+                f"{project_name} 策略优化 " + " ".join(strategy_files),
+            )
+            # Use streaming parse callback
+            accumulator = ""
+            def on_token(token: str) -> None:
+                nonlocal accumulator
+                accumulator += token
+                parsed, accumulator = parse_streaming_items(accumulator)
+                if parsed:
+                    save_analysis_items(workspace, parsed)
+                    pstate.analysis_items_count += len(parsed)
+                    pstate.save()
 
-    console.print(f"分析完成: 发现 {len(items)} 个优化方向")
+            response = _invoke_agent_with_tools(
+                "strategy_architect", prompt,
+                workspace=str(source_path),
+                source_id=f"brownfield:{project_name}",
+                stream_callback=on_token,
+            )
+
+            # Track cost after analyze LLM invoke
+            if max_cost > 0:
+                llm = get_llm()
+                if not llm.usage.is_empty:
+                    tracker.add_usage(llm.usage.prompt_tokens, llm.usage.completion_tokens,
+                                      resolve_model("strategy_architect")[0])
+                    if not tracker.can_continue():
+                        console.print(f"[red]预算超限 ({tracker.summary()})，已停止[/red]")
+                        pstate.total_cost = tracker.spent
+                        pstate.save()
+                        return
+
+            # Parse any remaining tokens
+            if accumulator.strip():
+                parsed, _ = parse_streaming_items(accumulator + "\n")
+                if parsed:
+                    save_analysis_items(workspace, parsed)
+                    pstate.analysis_items_count += len(parsed)
+                    pstate.save()
+
+            # Load all saved items
+            items_raw = load_analysis_items(workspace)
+            items = [StrategyItem(**d) for d in items_raw]
+
+            # Zero output detection
+            if not items:
+                pstate.fail("analysis produced zero parseable items")
+                console.print("[red]Layer 2 未产出结果。用 --from-layer 2 重跑[/red]")
+                return
+        else:
+            items = [_no_llm_item("未发现策略密集文件")]
+        pstate.complete_layer(Layer.ANALYZE)
 
     memory_hooks.on_analysis_complete(
         project_name,
