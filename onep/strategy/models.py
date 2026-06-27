@@ -84,3 +84,36 @@ class WorkbenchState:
     current_item_id: str | None = None
     scan_complete: bool = False
     analysis_complete: bool = False
+
+
+# ---- Impact classification ----
+
+IMPACT_RULES = {
+    "high": [
+        "api", "schema", "migration", "contract", "signature", "breaking",
+        "security", "injection", "leak", "crash", "data loss", "corruption",
+        "regression", "correctness",
+    ],
+    "medium": [
+        "performance", "latency", "slow", "cost", "token", "memory",
+        "duplicate", "retry", "timeout", "logging", "monitoring",
+        "refactor", "maintainability",
+    ],
+    "low": [
+        "naming", "rename", "style", "comment", "format", "type hint",
+        "docstring", "spelling", "typo", "import", "organize",
+    ],
+}
+
+
+def classify_impact(title: str, summary: str, tags: list[str],
+                    override: str | None = None) -> str:
+    """Classify impact as high/medium/low based on keyword heuristics.
+    Falls back to 'medium'. Accepts manual override."""
+    if override and override in ("high", "medium", "low"):
+        return override
+    text = (title + " " + summary + " " + " ".join(tags)).lower()
+    for level in ("high", "medium", "low"):
+        if any(kw in text for kw in IMPACT_RULES[level]):
+            return level
+    return "medium"
