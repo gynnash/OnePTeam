@@ -9,7 +9,7 @@ from rich.console import Console
 
 from onep.persistence.database import init_db, list_projects
 from onep.strategy.persistence import load_workbench
-from onep.strategy.scanner import load_batch_results as load_analysis_items_from_jsonl
+from onep.strategy.scanner import load_analysis_items as load_analysis_items_from_jsonl
 
 console = Console()
 

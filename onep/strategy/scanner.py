@@ -63,7 +63,46 @@ def get_strategy_files(results: list[ScanResult]) -> list[str]:
     return [r.file_path for r in results if r.is_strategy]
 
 
+def save_batch_results(workspace: Path, batch_index: int, results: list) -> None:
+    """Append batch scan results to JSONL file."""
+    path = workspace / "scan_results.jsonl"
+    with open(path, "a") as f:
+        for r in results:
+            record = {"batch": batch_index, "file": r.file_path,
+                      "is_strategy": r.is_strategy, "reason": r.reason}
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        f.flush()
+
+
 def load_batch_results(workspace: Path) -> list[dict]:
+    """Load all previously saved scan results."""
+    path = workspace / "scan_results.jsonl"
+    if not path.exists():
+        return []
+    results = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                results.append(json.loads(line))
+    return results
+
+
+def get_completed_batch_indices(workspace: Path) -> set[int]:
+    """Get set of batch indices already completed."""
+    path = workspace / "scan_results.jsonl"
+    if not path.exists():
+        return set()
+    indices = set()
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                indices.add(json.loads(line)["batch"])
+    return indices
+
+
+def load_analysis_items(workspace: Path) -> list[dict]:
     """Load analysis items from JSONL file in workspace."""
     path = workspace / "analysis_items.jsonl"
     if not path.exists():

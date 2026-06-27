@@ -17,6 +17,9 @@ from onep.persistence.database import init_db, insert_project
 from onep.persistence.models import Project, ProjectMode
 from onep.strategy.models import WorkbenchState
 from onep.strategy.scanner import walk_files, batch_files, parse_scan_response, get_strategy_files
+from onep.strategy.scanner import save_batch_results, load_batch_results, get_completed_batch_indices
+from onep.strategy.pipeline_state import PipelineState, Layer, Status
+from onep.strategy.retry import retry_with_backoff
 from onep.strategy.analyzer import parse_analysis_response
 from onep.strategy.persistence import save_workbench
 from onep.memory import hooks as memory_hooks
@@ -147,6 +150,16 @@ def _build_scan_file_input(
     return "\n\n".join(sections)
 
 
+def _brief(value) -> str:
+    """Short display for tool call arguments."""
+    s = str(value)
+    if "/" in s:
+        return s.rsplit("/", 1)[-1]
+    if len(s) > 70:
+        return s[:67] + "..."
+    return s
+
+
 def _invoke_agent_with_tools(
     agent_name: str,
     user_prompt: str,
@@ -176,12 +189,13 @@ def _invoke_agent_with_tools(
             user_prompt=user_prompt,
             tools=tools,
             stage_name=agent_name,
+            max_tool_rounds=12,
         ):
             if event["type"] == "tool_call":
                 args_str = ", ".join(
-                    f"{k}={repr(v)[:60]}" for k, v in event.get("tool_args", {}).items()
+                    f"{k}={_brief(v)}" for k, v in event.get("tool_args", {}).items()
                 )
-                console.print(f"  [dim]调用 {event['tool_name']}({args_str})[/dim]")
+                console.print(f"  [dim]{event['tool_name']}({args_str})[/dim]")
             elif event["type"] == "tool_call_result":
                 pass  # silent — result is fed back to LLM
             elif event["type"] == "token":
@@ -191,13 +205,22 @@ def _invoke_agent_with_tools(
                 pass
 
         console.print()  # newline after streaming
-        return "".join(response_parts) if response_parts else None
+        result = "".join(response_parts) if response_parts else None
+        if not result:
+            console.print("[yellow]工具调用未产出结果，回退到裸调[/yellow]")
+            return _invoke_agent(agent_name, user_prompt, workspace, source_id)
+        return result
     except Exception as e:
         console.print(f"[yellow]工具调用失败，回退到裸调: {e}[/yellow]")
         return _invoke_agent(agent_name, user_prompt, workspace, source_id)
 
 
-def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str) -> None:
+def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str, from_layer: str | None = None) -> None:
+    # Handle from_layer
+    if from_layer == "2" or from_layer == "3":
+        pstate = PipelineState(project_name=project_name, workspace=str(workspace))
+        pstate.start_from(Layer.ANALYZE if from_layer == "2" else Layer.DIALOGUE)
+
     # ------- Layer 1: Scan -------
     console.print("\n[bold cyan]=== Layer 1: 快速扫描 ===[/bold cyan]")
     console.print("[dim]代码分析师 Agent 扫描中...[/dim]")
@@ -206,33 +229,50 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str) ->
     batches = batch_files(all_files)
     all_results = []
 
-    for i, batch in enumerate(batches):
-        scan_input = _build_scan_file_input(source_path, batch)
-        prompt = SCAN_PROMPT.format(file_list=scan_input)
-        prompt = _append_analysis_memory(
-            prompt,
-            "analyzer",
-            project_name,
-            f"{project_name} 策略扫描 " + " ".join(
-                str(f.relative_to(source_path)) for f in batch
-            ),
-        )
+    # Check for existing state
+    pstate = PipelineState(project_name=project_name, workspace=str(workspace))
+    existing = PipelineState.load(str(workspace))
+    if existing and existing.status in (Status.SCAN_DONE, Status.ANALYZING,
+                                         Status.ANALYZE_DONE, Status.DIALOGUE_ACTIVE,
+                                         Status.COMPLETED):
+        console.print("[dim]Scan already completed, loading saved results[/dim]")
+        all_results = load_batch_results(workspace)
+    else:
+        pstate.start_layer(Layer.SCAN)
+        completed_batches = get_completed_batch_indices(workspace)
 
-        response = _invoke_agent(
-            "analyzer", prompt, workspace=str(source_path),
-            source_id=f"brownfield:{project_name}",
-        )
-        if response:
-            batch_results = parse_scan_response(response)
-        else:
-            batch_results = [
-                _no_llm_scan_result(str(f.relative_to(source_path)))
-                for f in batch
-            ]
-        all_results.extend(batch_results)
+        for i, batch in enumerate(batches):
+            if i in completed_batches:
+                pstate.scan_completed_batches.append(i)
+                continue
 
-        if len(batches) > 1:
-            console.print(f"  [dim]批次 {i + 1}/{len(batches)} 完成[/dim]")
+            relative_paths = [str(f.relative_to(source_path)) for f in batch]
+            prompt = SCAN_PROMPT.format(file_list="\n".join(relative_paths))
+
+            def do_invoke():
+                return _invoke_agent("analyzer", prompt)
+
+            response = retry_with_backoff(do_invoke)
+            if response:
+                batch_results = parse_scan_response(response)
+            else:
+                batch_results = [
+                    _no_llm_scan_result(str(f.relative_to(source_path)))
+                    for f in batch
+                ]
+                pstate.scan_failed_batches.append(
+                    {"batch": i, "files": len(batch), "retries": 3}
+                )
+
+            save_batch_results(workspace, i, batch_results)
+            pstate.scan_completed_batches.append(i)
+            pstate.save()
+            all_results.extend(batch_results)
+
+            if len(batches) > 1:
+                console.print(f"  [dim]批次 {i + 1}/{len(batches)} 完成[/dim]")
+
+        pstate.complete_layer(Layer.SCAN)
 
     strategy_files = get_strategy_files(all_results)
     console.print(f"扫描完成: {len(all_files)} 个文件, {len(strategy_files)} 个策略密集文件")
