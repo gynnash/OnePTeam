@@ -1,6 +1,7 @@
 """Optimize Engine — open agent loop for strategy item execution."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from rich.console import Console
@@ -90,15 +91,57 @@ class OptimizeEngine:
             return result
 
         result["files_changed"] = _extract_files(output)
-        passed = _check_test_result(output)
-        result["test_output"] = {"passed": passed, "output": output[:500]}
-        result["success"] = passed
+        result["test_output"] = {
+            "passed": False,
+            "output": "External test gate has not run.",
+        }
+        result["error"] = "external test gate required"
 
         return result
 
+    def execute_attempt(
+        self,
+        item: StrategyItem,
+        source_path: str,
+        workspace: str,
+        llm_adapter,
+        feedback: str = "",
+        memory_context: str = "",
+    ) -> "EngineAttemptResult":
+        if llm_adapter is None:
+            raise RuntimeError("LLM not available")
+        plan_content = item.summary
+        if item.plan_path and Path(item.plan_path).exists():
+            plan_content = Path(item.plan_path).read_text()[:12000]
+        prompt = EXECUTE_PROMPT.format(
+            title=item.title,
+            file_location=item.file_location,
+            summary=item.summary,
+            tags=", ".join(item.tags),
+            impact=item.impact,
+            plan_content=plan_content,
+            source_path=source_path,
+        )
+        if feedback:
+            prompt += (
+                "\n\n## 上一轮门禁反馈\n"
+                f"{feedback}\n请在当前分支继续修复，不要回滚已正确的改动。"
+            )
+        if memory_context:
+            from onep.memory.context import append_memory_context
+            prompt = append_memory_context(prompt, memory_context)
+        ctx = load_project_context(Path(workspace), source_path)
+        if ctx:
+            prompt += f"\n\n## 项目上下文\n\n{ctx[:4000]}"
+        output = _invoke_stream(
+            llm_adapter, "developer", prompt, source_path,
+            model_stage="optimize_developer",
+        )
+        return EngineAttemptResult(output=output or "")
+
 
 def _invoke_stream(llm_adapter, agent_name: str, prompt: str,
-                   source_path: str) -> str:
+                   source_path: str, model_stage: str | None = None) -> str:
     """Invoke agent with tools and streaming output."""
     from onep.agents.registry import get_agent
     from onep.llm.router import resolve_model
@@ -113,7 +156,8 @@ def _invoke_stream(llm_adapter, agent_name: str, prompt: str,
         f"遇到错误要自己排查修复，不要放弃。"
     )
     tools = getattr(agent, "tools", []) or []
-    model_name, _ = resolve_model(agent_name)
+    stage_name = model_stage or agent_name
+    model_name, _ = resolve_model(stage_name)
 
     console.print(f"  [dim]Agent: {agent.role} | Model: {model_name}[/dim]")
     tool_names = [t.name for t in tools]
@@ -124,7 +168,7 @@ def _invoke_stream(llm_adapter, agent_name: str, prompt: str,
         system_prompt=system_prompt,
         user_prompt=prompt,
         tools=tools,
-        stage_name=agent_name,
+        stage_name=stage_name,
         max_tool_rounds=15,
     ):
         if event["type"] == "tool_call":
@@ -165,11 +209,6 @@ def _extract_files(output: str) -> list[str]:
     return sorted(files)[:20]
 
 
-def _check_test_result(output: str) -> bool:
-    """Heuristic: did tests pass?"""
-    lower = output.lower()
-    if "passed" in lower and "failed" not in lower:
-        return True
-    if "error" in lower or "fail" in lower:
-        return False
-    return "success" in lower
+@dataclass(frozen=True)
+class EngineAttemptResult:
+    output: str

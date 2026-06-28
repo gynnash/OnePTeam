@@ -29,6 +29,8 @@ class StrategyItem:
     summary: str = ""
     impact: str = "medium"
     tags: list[str] = field(default_factory=list)
+    expected_files: list[str] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
     status: ItemStatus = ItemStatus.PENDING
     discussion_summary: str = ""
     plan_path: str | None = None

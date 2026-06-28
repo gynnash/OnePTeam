@@ -118,3 +118,19 @@ def test_read_rejects_path_outside_source_root(tmp_path, capsys):
     _cmd_read("../secret.txt", wb)
 
     assert "路径超出源码范围" in capsys.readouterr().out
+
+
+def test_workbench_export_writes_inside_workspace(tmp_path):
+    from tests.test_strategy.reporting_fakes import make_workbench_with_item
+
+    wb = make_workbench_with_item(tmp_path)
+    handle_slash_command("export", "reports/analysis.md", wb, tmp_path)
+    assert (tmp_path / "reports" / "analysis.md").exists()
+
+
+def test_workbench_export_rejects_parent_path(tmp_path, capsys):
+    from tests.test_strategy.reporting_fakes import make_workbench_with_item
+
+    wb = make_workbench_with_item(tmp_path)
+    handle_slash_command("export", "../outside.md", wb, tmp_path)
+    assert "路径超出" in capsys.readouterr().out

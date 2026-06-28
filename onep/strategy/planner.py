@@ -1,10 +1,89 @@
 """Plan generator — produces standard and full optimization plans."""
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from pathlib import Path
 from onep.strategy.models import StrategyItem
 from onep.strategy.persistence import save_plan
 from onep.memory.context import append_memory_context
+
+
+@dataclass(frozen=True)
+class GeneratedOptimizePlan:
+    plan_path: str
+    plan_markdown: str
+    expected_files: tuple[str, ...]
+    dependencies: tuple[str, ...]
+    test_commands: tuple[str, ...]
+    risk_flags: tuple[str, ...]
+
+
+def generate_optimize_plan(
+    item: StrategyItem,
+    workspace: Path,
+    llm_adapter,
+    plan_index: int = 1,
+    memory_context: str = "",
+) -> GeneratedOptimizePlan:
+    if llm_adapter is None:
+        raise ValueError("LLM is required for Plan generation")
+    prompt = append_memory_context(
+        _build_standard_prompt(item)
+        + """
+
+Return exactly one JSON object with these fields:
+{
+  "plan_markdown": "complete Markdown Plan",
+  "expected_files": ["project/relative/path"],
+  "dependencies": ["Plan title or item id"],
+  "test_commands": ["focused test command"],
+  "risk_flags": ["schema|api_contract|manifest|shared_config|semantic_coupling"]
+}
+Do not wrap the JSON in Markdown fences.""",
+        memory_context,
+    )
+    raw = llm_adapter.invoke(
+        system_prompt="You are a strategy architect. Return strict JSON only.",
+        user_prompt=prompt,
+        stage_name="strategy_architect",
+    )
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("Plan generation returned invalid JSON") from exc
+    required = {
+        "plan_markdown", "expected_files", "dependencies",
+        "test_commands", "risk_flags",
+    }
+    if not isinstance(data, dict) or required - set(data):
+        raise ValueError("Plan generation output is missing required metadata")
+    markdown = data["plan_markdown"]
+    if not isinstance(markdown, str) or not markdown.strip():
+        raise ValueError("Plan generation returned empty Markdown")
+    list_fields = {}
+    for field_name in required - {"plan_markdown"}:
+        value = data[field_name]
+        if not isinstance(value, list) or not all(
+            isinstance(entry, str) and entry.strip() for entry in value
+        ):
+            raise ValueError(f"Plan metadata {field_name} must be a string list")
+        list_fields[field_name] = tuple(entry.strip() for entry in value)
+    for relative in list_fields["expected_files"]:
+        path = Path(relative)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"Plan expected_files path is unsafe: {relative}")
+    plan_id = f"{plan_index:03d}-{item.title.replace(' ', '-')[:50]}"
+    plan_path = save_plan(workspace, plan_id, markdown)
+    item.draft_plan(plan_path)
+    return GeneratedOptimizePlan(
+        plan_path=plan_path,
+        plan_markdown=markdown,
+        expected_files=list_fields["expected_files"],
+        dependencies=list_fields["dependencies"],
+        test_commands=list_fields["test_commands"],
+        risk_flags=list_fields["risk_flags"],
+    )
 
 
 STANDARD_PLAN_TEMPLATE = """# 优化 Plan: {title}

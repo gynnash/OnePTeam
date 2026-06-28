@@ -4,6 +4,8 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Iterator
+from dataclasses import dataclass, field
+from uuid import uuid4
 from typing import Any
 
 from litellm import completion
@@ -14,11 +16,13 @@ from onep.llm.router import resolve_model, get_api_key, get_api_base
 console = Console()
 
 
+@dataclass(frozen=True)
 class TokenUsage:
     """Token usage stats from the most recent LLM call."""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    call_id: str = field(default_factory=lambda: uuid4().hex)
 
     @property
     def is_empty(self) -> bool:
@@ -37,7 +41,12 @@ class LLMAdapter:
     def __init__(self):
         self.usage = TokenUsage()
 
+    @property
+    def last_usage(self) -> TokenUsage:
+        return self.usage
+
     def invoke(self, system_prompt: str, user_prompt: str, stage_name: str) -> str:
+        self.reset_usage()
         model_name, provider = resolve_model(stage_name)
         api_key = get_api_key(provider)
         api_base = get_api_base(provider)
@@ -57,6 +66,7 @@ class LLMAdapter:
 
     def invoke_stream(self, system_prompt: str, user_prompt: str, stage_name: str) -> Iterator[str]:
         """Stream LLM response token by token. Usage captured from final chunk."""
+        self.reset_usage()
         model_name, provider = resolve_model(stage_name)
         api_key = get_api_key(provider)
         api_base = get_api_base(provider)
@@ -94,6 +104,7 @@ class LLMAdapter:
           tool_result: str (for tool_call only)
           usage: TokenUsage (for done only)
         """
+        self.reset_usage()
         model_name, provider = resolve_model(stage_name)
         api_key = get_api_key(provider)
         api_base = get_api_base(provider)
@@ -131,7 +142,7 @@ class LLMAdapter:
 
             for chunk in response:
                 delta = chunk.choices[0].delta
-                self._capture_stream_usage(chunk)
+                self._capture_stream_usage(chunk, accumulate=True)
 
                 # text content
                 if delta.content:
@@ -233,15 +244,25 @@ class LLMAdapter:
 
     def _capture_usage(self, response: Any) -> None:
         if hasattr(response, "usage") and response.usage:
-            self.usage.prompt_tokens = response.usage.prompt_tokens or 0
-            self.usage.completion_tokens = response.usage.completion_tokens or 0
-            self.usage.total_tokens = response.usage.total_tokens or 0
+            self.usage = TokenUsage(
+                response.usage.prompt_tokens or 0,
+                response.usage.completion_tokens or 0,
+                response.usage.total_tokens or 0,
+                self.usage.call_id,
+            )
 
-    def _capture_stream_usage(self, chunk: Any) -> None:
+    def _capture_stream_usage(self, chunk: Any, accumulate: bool = False) -> None:
         if hasattr(chunk, "usage") and chunk.usage:
-            self.usage.prompt_tokens = chunk.usage.prompt_tokens or 0
-            self.usage.completion_tokens = chunk.usage.completion_tokens or 0
-            self.usage.total_tokens = chunk.usage.total_tokens or 0
+            prompt = chunk.usage.prompt_tokens or 0
+            completion = chunk.usage.completion_tokens or 0
+            total = chunk.usage.total_tokens or 0
+            if accumulate:
+                prompt += self.usage.prompt_tokens
+                completion += self.usage.completion_tokens
+                total += self.usage.total_tokens
+            self.usage = TokenUsage(
+                prompt, completion, total, self.usage.call_id
+            )
 
     def reset_usage(self) -> None:
         self.usage = TokenUsage()

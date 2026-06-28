@@ -13,7 +13,10 @@ class TaskComplexity(str, Enum):
     COMPLEX = "complex"
 
 
-COMPLEX_STAGES = {"pm", "designer", "architect", "strategy_architect"}
+COMPLEX_STAGES = {
+    "pm", "designer", "architect", "strategy_architect",
+    "optimize_developer", "code_reviewer",
+}
 
 
 def resolve_model(stage_name: str, task_complexity: TaskComplexity = TaskComplexity.STANDARD) -> tuple[str, str]:

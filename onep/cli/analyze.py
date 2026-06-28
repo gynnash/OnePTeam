@@ -16,7 +16,10 @@ from onep.config import load_config
 from onep.persistence.database import init_db, insert_project
 from onep.persistence.models import Project, ProjectMode
 from onep.strategy.models import WorkbenchState, StrategyItem
-from onep.strategy.scanner import walk_files, batch_files, parse_scan_response, get_strategy_files, ScanResult
+from onep.strategy.scanner import (
+    ScanResult, aggregate_chunk_results, aggregate_file_results, batch_files,
+    build_content_batches, get_strategy_files, parse_scan_response, walk_files,
+)
 from onep.strategy.scanner import save_batch_results, load_batch_results, get_completed_batch_indices
 from onep.strategy.pipeline_state import PipelineState, Layer, Status
 from onep.strategy.retry import retry_with_backoff
@@ -53,9 +56,12 @@ console = Console()
 @click.option("--from-layer", "from_layer", type=click.Choice(["1", "2", "3"]),
               default=None, help="Start from specific layer")
 @click.option("--no-dialogue", is_flag=True, help="Skip interactive dialogue")
+@click.option("--export", "export_path", type=click.Path(path_type=Path),
+              default=None, help="Write the final Markdown or JSON report")
 def analyze_cmd(source: str, mode: str, name: str | None, max_cost: float = 0,
                 resume: bool = False, from_layer: str | None = None,
-                no_dialogue: bool = False):
+                no_dialogue: bool = False,
+                export_path: Path | None = None):
     """Analyze a codebase for strategy optimizations.
 
     SOURCE can be a local path or a git repository URL.
@@ -75,7 +81,8 @@ def analyze_cmd(source: str, mode: str, name: str | None, max_cost: float = 0,
     if mode == "strategy":
         _run_strategy_mode(source_path, workspace, name,
                           from_layer=from_layer, max_cost=max_cost,
-                          resume=resume, no_dialogue=no_dialogue)
+                          resume=resume, no_dialogue=no_dialogue,
+                          export_path=export_path)
     else:
         console.print(f"[yellow]Mode '{mode}' not yet implemented.[/yellow]")
 
@@ -156,20 +163,10 @@ def _build_scan_file_input(
     max_file_chars: int = 6000,
     max_batch_chars: int = 60000,
 ) -> str:
-    sections = []
-    used = 0
-    for file_path in files:
-        relative = str(file_path.relative_to(source_path))
-        try:
-            content = file_path.read_text(errors="replace")[:max_file_chars]
-        except OSError:
-            content = "[无法读取]"
-        section = f"### {relative}\n```\n{content}\n```"
-        if used + len(section) > max_batch_chars:
-            break
-        sections.append(section)
-        used += len(section)
-    return "\n\n".join(sections)
+    batches = build_content_batches(
+        source_path, files, max_file_chars, max_batch_chars
+    )
+    return batches[0].render() if batches else ""
 
 
 def _print_agent_trace(agent, agent_name: str, system_prompt: str,
@@ -259,7 +256,8 @@ def _invoke_agent_with_tools(
 
 def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str,
                       from_layer: str | None = None, max_cost: float = 0,
-                      resume: bool = False, no_dialogue: bool = False) -> None:
+                      resume: bool = False, no_dialogue: bool = False,
+                      export_path: Path | None = None) -> None:
     tracker = CostTracker(budget=max_cost)
 
     # Resume from checkpoint
@@ -336,31 +334,49 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str,
                     uncached.append((f, relative, content))
 
             if uncached:
-                file_block = _build_scan_file_input(
+                content_batches = build_content_batches(
                     source_path, [f for f, _, _ in uncached]
                 )
-                prompt = SCAN_PROMPT_FULL.format(file_block=file_block)
-
-                def do_invoke():
-                    return _invoke_agent("analyzer", prompt)
-
-                response = retry_with_backoff(do_invoke)
-                if response:
-                    new_results = parse_scan_response(response)
-                    for r in new_results:
-                        for f, rel, content in uncached:
-                            if r.file_path == rel:
-                                cache.put(rel, content, r.is_strategy, r.reason)
-                                break
-                    batch_results.extend(new_results)
-                else:
-                    for f, relative, content in uncached:
-                        result = _no_llm_scan_result(relative)
-                        batch_results.append(result)
-                        cache.put(relative, content, result.is_strategy, result.reason)
-                    pstate.scan_failed_batches.append(
-                        {"batch": i, "files": len(uncached), "retries": 3}
+                new_results = []
+                entries = [
+                    entry for content_batch in content_batches
+                    for entry in content_batch.entries
+                ]
+                for content_batch in content_batches:
+                    prompt = SCAN_PROMPT_FULL.format(
+                        file_block=content_batch.render()
                     )
+
+                    def do_invoke():
+                        return _invoke_agent("analyzer", prompt)
+
+                    response = retry_with_backoff(do_invoke)
+                    if response:
+                        parsed = parse_scan_response(response)
+                    else:
+                        parsed = []
+                        pstate.scan_failed_batches.append(
+                            {
+                                "batch": i,
+                                "chunks": [
+                                    entry.chunk_id
+                                    for entry in content_batch.entries
+                                ],
+                                "retries": 3,
+                            }
+                        )
+                    new_results.extend(aggregate_chunk_results(
+                        list(content_batch.entries), parsed
+                    ))
+                new_results = aggregate_file_results(
+                    [entry.relative_path for entry in entries], new_results
+                )
+                for r in new_results:
+                    for f, rel, content in uncached:
+                        if r.file_path == rel:
+                            cache.put(rel, content, r.is_strategy, r.reason)
+                            break
+                batch_results.extend(new_results)
 
             # Track cost after scan LLM invoke
             if max_cost > 0:
@@ -515,6 +531,24 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str,
 
     save_workbench(workspace, wb)
     console.print(f"[dim]当前花费: {tracker.summary()}[/dim]")
+    if export_path:
+        from onep.strategy.reporting import AnalysisReport, AnalysisReportService
+        service = AnalysisReportService()
+        report = service.from_items(
+            project_name,
+            str(source_path),
+            items,
+            scanned_files=len(all_files),
+            strategy_files=len(strategy_files),
+            parameters={
+                "mode": "strategy",
+                "max_cost": max_cost,
+                "resume": resume,
+            },
+            total_cost=tracker.spent,
+        )
+        service.write(report, export_path)
+        console.print(f"[green]已导出: {export_path}[/green]")
 
     # ------- Layer 3: Dialogue -------
     if no_dialogue:

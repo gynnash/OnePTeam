@@ -45,6 +45,12 @@ class PipelineConfig:
     auto_approve: bool = False
     max_retries: int = 3
     test_timeout: int = 300
+    stage_output_tokens: dict[str, int] = field(default_factory=lambda: {
+        "analyzer": 2048,
+        "strategy_architect": 8192,
+        "optimize_developer": 8192,
+        "code_reviewer": 4096,
+    })
 
 
 @dataclass
@@ -107,6 +113,7 @@ def save_config(config: Config) -> None:
             "auto_approve": config.pipeline.auto_approve,
             "max_retries": config.pipeline.max_retries,
             "test_timeout": config.pipeline.test_timeout,
+            "stage_output_tokens": config.pipeline.stage_output_tokens,
         },
     }
     _config_path().write_text(yaml.dump(raw, default_flow_style=False))

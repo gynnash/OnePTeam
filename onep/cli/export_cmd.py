@@ -2,50 +2,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-import json
-
 import click
 from rich.console import Console
 
 from onep.persistence.database import init_db, list_projects
 from onep.strategy.persistence import load_workbench
 from onep.strategy.scanner import load_analysis_items as load_analysis_items_from_jsonl
+from onep.strategy.reporting import AnalysisReport, AnalysisReportService
 
 console = Console()
 
 
 def _build_markdown(project_name: str, source_path: str, items: list[dict]) -> str:
-    lines = [
-        f"# 策略分析报告: {project_name}",
-        "",
-        "## 概览",
-        f"- 源路径: {source_path}",
-        f"- 发现优化方向: {len(items)} 个",
-        "",
-        "## 优化方向",
-        "",
-    ]
-    for i, item in enumerate(items, 1):
-        impact = item.get("impact", "?")
-        emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(impact, "⚪")
-        lines.append(f"### {i}. {emoji} [{impact}] {item.get('title', '?')}")
-        lines.append(f"- **文件**: {item.get('file_location', '?')}")
-        tags = item.get("tags", [])
-        if isinstance(tags, str):
-            try:
-                tags = json.loads(tags)
-            except (json.JSONDecodeError, TypeError):
-                tags = [tags]
-        lines.append(f"- **标签**: {', '.join(tags) if tags else '无'}")
-        lines.append(f"- **摘要**: {item.get('summary', '?')}")
-        plan = item.get("plan_path", "")
-        if plan:
-            lines.append(f"- **Plan**: {plan}")
-        lines.append("")
-
-    lines.extend(["## 附录", "",
-                  f"- 导出时间: {__import__('datetime').datetime.now().isoformat()}"])
-    return "\n".join(lines)
+    return AnalysisReportService().render(
+        AnalysisReport(project_name, source_path, items=items), "md"
+    )
 
 
 @click.command()
@@ -79,14 +50,12 @@ def export_group(project: str, output: str | None, fmt: str):
 
     source_path = wb.source_path if wb else "unknown"
 
-    if fmt == "json":
-        content = json.dumps({"project": project, "source_path": source_path,
-                              "items": items}, ensure_ascii=False, indent=2)
-    else:
-        content = _build_markdown(project, source_path, items)
+    service = AnalysisReportService()
+    report = service.from_items(project, source_path, items)
+    content = service.render(report, fmt)
 
     if output:
-        Path(output).write_text(content)
+        Path(output).write_text(content, encoding="utf-8")
         console.print(f"[green]Exported to {output}[/green]")
     else:
         console.print(content)

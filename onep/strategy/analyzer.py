@@ -25,6 +25,8 @@ def parse_analysis_response(response: str) -> list[StrategyItem]:
                 tags=obj.get("tags", []),
                 impact=obj.get("impact", "medium"),
                 summary=obj.get("summary", ""),
+                expected_files=obj.get("expected_files", []),
+                dependencies=obj.get("dependencies", []),
             ))
         except (json.JSONDecodeError, KeyError):
             continue

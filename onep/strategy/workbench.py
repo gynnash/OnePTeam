@@ -31,6 +31,7 @@ SLASH_COMMANDS = {
     "approve": "approve",
     "execute": "execute",
     "rescan": "rescan",
+    "export": "export",
 }
 
 HELP_TEXT = """\
@@ -49,6 +50,7 @@ HELP_TEXT = """\
   [bold]/save[/bold]                保存工作台
   [bold]/execute[/bold] <n>          执行第 n 个优化方向的开发+测试
   [bold]/rescan[/bold]              重新扫描源码，刷新优化方向列表
+  [bold]/export[/bold] <file>        导出当前分析报告到工作区
   [bold]/help[/bold]                显示此帮助
   [bold]/exit[/bold]                保存并退出"""
 
@@ -135,6 +137,32 @@ def handle_slash_command(
         _cmd_execute(args, wb, workspace, llm_adapter)
     elif cmd == "rescan":
         wb = _cmd_rescan(wb, workspace, llm_adapter)
+    elif cmd == "export":
+        from onep.strategy.reporting import AnalysisReport, AnalysisReportService
+        service = AnalysisReportService()
+        try:
+            output = service.safe_output_path(
+                workspace, args.strip() or "analysis-report.md"
+            )
+            report = service.from_workbench(wb)
+            service.write(report, output)
+            console.print(f"[green]已导出: {output}[/green]")
+            turn = DialogueTurn(
+                role="system",
+                content=f"Exported analysis report to {output}",
+                slash_command="export",
+            )
+            wb.dialogue.append(turn)
+            append_dialogue(workspace, turn)
+        except Exception as exc:
+            console.print(f"[red]{exc}[/red]")
+            turn = DialogueTurn(
+                role="system",
+                content=f"Analysis report export failed: {exc}",
+                slash_command="export",
+            )
+            wb.dialogue.append(turn)
+            append_dialogue(workspace, turn)
     elif cmd == "help":
         console.print(HELP_TEXT)
     elif cmd == "exit":

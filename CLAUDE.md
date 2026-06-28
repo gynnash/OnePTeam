@@ -54,22 +54,28 @@ Click commands auto-discovered via `COMMANDS` list export:
 
 8 agents registered via `@register("name")` decorator. All factories accept `workspace` and `source_id` kwargs for tool initialization. Key agent:
 
-- **strategy_architect** — Complex model (GPT-4o). Tools: FileReadTool, FileListTool, GrepTool, MemoryTool. Used in Brownfield Layer 2 analysis, plan generation, and workbench dialogue.
-- **developer** — Default model (DeepSeek). Tools: FileReadTool, FileWriteTool, FileListTool, EditTool, ShellTool, LintTool, GrepTool, MemoryTool. Used in `/execute` and `onep optimize`.
+- **strategy_architect** — Complex model. Tools: FileReadTool, FileListTool, GrepTool, MemoryTool. Used in Brownfield Layer 2 analysis, plan generation, and workbench dialogue.
+- **developer** — Default model for ordinary development; Optimize routes the same tool-enabled persona through the `optimize_developer` complex stage.
+- **code_reviewer** — Complex model, tool-free and read-only. Returns structured blocking findings for the Optimize gate.
 - **analyzer** — Default model. Tools: FileReadTool, FileListTool, MemoryTool. Used in Layer 1 scanning.
 
 ### Strategy Analysis (`onep/strategy/`)
 
 The Brownfield subsystem, now multi-layer with production features:
 
-- `scanner.py` — File walking, batching, JSONL parsing. Scanner sends full file CONTENT (not just paths) to LLM for accurate classification.
+- `scanner.py` — File walking, token-aware content sub-batching, JSONL parsing. Every file and large-file tail is covered.
 - `scan_cache.py` — Hash-based file scan result cache. Skips LLM re-classification for unchanged files.
 - `analyzer.py` — JSONL parsing from LLM responses. Streaming parse for Layer 2 output.
-- `workbench.py` — Interactive dialogue with slash commands (list, focus, plan, execute, rescan, etc.).
+- `workbench.py` — Interactive dialogue with slash commands (list, focus, plan, execute, rescan, export, etc.).
 - `planner.py` — Optimization plan generation (standard/full versions).
 - `persistence.py` — YAML (workbench.yaml) + JSONL (dialogue.jsonl).
 - `pipeline_state.py` — State machine for analyze pipeline (INIT→SCANNING→SCAN_DONE→ANALYZING→ANALYZE_DONE→DIALOGUE_ACTIVE→COMPLETED). Persists to YAML checkpoint.
-- `optimize_engine.py` — Open agent loop for executing optimization items. Single LLM call with think→act→observe via `invoke_with_tools_stream`. Replaced old 3-step fixed pipeline.
+- `optimize_engine.py` — One LLM-led development attempt using the tool loop; it never decides whether tests passed.
+- `optimize_coordinator.py` — Up to three develop → real test → read-only review → repair attempts. Commits only after both gates pass.
+- `git_session.py` — Clean-repository preflight, same-baseline Plan worktree groups, one-commit rule, integration cherry-pick, and verified rollback.
+- `optimize_recorder.py` — Durable run state/events and Plan artifacts outside disposable branches.
+- `plan_scheduler.py` — Stable fingerprints, convergence, dependency/risk conflicts, parallel development groups, and deterministic integration order.
+- `reporting.py` — Shared Markdown/JSON reports for Analyze, Workbench, and export.
 - `retry.py` — LLM call retry with exponential backoff for transient errors.
 - `project_context.py` — Auto-generates project overview (tech stack, conventions), injects into all LLM calls.
 

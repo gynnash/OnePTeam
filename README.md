@@ -85,7 +85,10 @@ onep analyze ./repo --max-cost 5.00
 /rescan         # 重新扫描
 
 # 全自动优化（可下班跑）
-onep optimize ./repo --max-rounds 5 --auto-approve low,medium --max-cost 20.00
+onep optimize ./repo --max-rounds 5 --auto-approve low,medium \
+  --test-command "pytest tests/unit -q" \
+  --integration-test-command "pytest -q" \
+  --max-cost 20.00
 
 # 导出报告
 onep export myproject
@@ -152,6 +155,7 @@ onep memory import myproject
 | `/read <file>` | 读取源码文件 |
 | `/ls <dir>` | 列出目录 |
 | `/rescan` | 重新扫描源码 |
+| `/export <file>` | 导出当前分析报告 |
 | `/status` | 查看进度 |
 | `/help` | 帮助 |
 | `/exit` | 保存退出 |
@@ -167,10 +171,19 @@ onep optimize ./repo --max-rounds 5 --auto-approve low,medium --max-cost 20.00
 | 闸门 | 机制 |
 |------|------|
 | 影响级别 | `high` 必须人审，`low/medium` 自动执行 |
-| 测试 | 改动后跑 pytest，不通过自动 git revert |
-| 成本 | 超预算自动停 |
+| 分支隔离 | 每个 Plan 使用独立 branch + worktree |
+| 启动条件 | 源仓库必须位于 named branch 且 tracked/untracked 均干净 |
+| 开发循环 | 同组并行开发，单一 LLM Developer 根据反馈最多修复 3 次 |
+| 测试 | 使用真实进程退出码，不采信 LLM 对测试结果的描述 |
+| 评审 | 独立、只读的结构化 code reviewer |
+| 提交 | 测试与评审均通过后只创建一个 commit |
+| 回滚 | 失败 Plan 恢复 tracked 文件，仅删除该 Plan 新建的 untracked 文件 |
+| 集成 | 开发完成后按依赖、影响、发现顺序串行集成并运行整体测试 |
+| 成本 | 按稳定 call ID 记录实际 token；预算模式缺少模型价格时拒绝启动 |
 
-输出：终端进度 + `optimize_log.jsonl` + `optimize_report.md`
+完整运行记录保存在
+`~/.onep/projects/<name>/workspace/optimize/runs/<run-id>/`，包含所有成功、
+失败和跳过 Plan、每轮测试/评审、最终 diff、失败原因及报告。
 
 ## 工具系统
 
