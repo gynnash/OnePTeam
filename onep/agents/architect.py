@@ -3,6 +3,8 @@ from crewai import Agent
 
 from onep.agents.registry import register
 from onep.tools.filesystem import FileReadTool, FileWriteTool, FileListTool
+from onep.tools.grep import GrepTool
+from onep.tools.edit import EditTool
 from onep.tools.memory import MemoryTool
 
 
@@ -14,6 +16,8 @@ def create_architect(workspace: str = "", source_id: str = "") -> Agent:
             FileReadTool(workspace=workspace),
             FileWriteTool(workspace=workspace),
             FileListTool(workspace=workspace),
+            GrepTool(workspace=workspace),
+            EditTool(workspace=workspace),
             MemoryTool(default_source_id=source_id),
         ]
 

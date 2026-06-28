@@ -4,6 +4,7 @@ from crewai import Agent
 from onep.agents.registry import register
 from onep.tools.filesystem import FileReadTool, FileWriteTool
 from onep.tools.shell import ShellTool
+from onep.tools.grep import GrepTool
 from onep.tools.memory import MemoryTool
 
 
@@ -15,6 +16,7 @@ def create_tester(workspace: str = "", source_id: str = "") -> Agent:
             FileReadTool(workspace=workspace),
             FileWriteTool(workspace=workspace),
             ShellTool(workspace=workspace),
+            GrepTool(workspace=workspace),
             MemoryTool(default_source_id=source_id),
         ]
 

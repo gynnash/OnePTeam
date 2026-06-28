@@ -5,6 +5,8 @@ from onep.agents.registry import register
 from onep.tools.filesystem import FileReadTool, FileWriteTool, FileListTool
 from onep.tools.shell import ShellTool
 from onep.tools.lint import LintTool
+from onep.tools.grep import GrepTool
+from onep.tools.edit import EditTool
 from onep.tools.memory import MemoryTool
 
 
@@ -18,6 +20,8 @@ def create_developer(workspace: str = "", source_id: str = "") -> Agent:
             FileListTool(workspace=workspace),
             ShellTool(workspace=workspace),
             LintTool(workspace=workspace),
+            GrepTool(workspace=workspace),
+            EditTool(workspace=workspace),
             MemoryTool(default_source_id=source_id),
         ]
 

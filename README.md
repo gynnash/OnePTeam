@@ -1,18 +1,21 @@
 # OnePTeam
 
-由多个 AI Agent 组成的全栈软件开发团队。用户只需用自然语言描述需求，系统自动编排产品经理、UI/UX 设计师、架构师、研发工程师、测试工程师和 DevOps 工程师协同工作，完成从产品定义到部署发布的全链路交付。
+由多个 AI Agent 组成的全栈软件开发团队。支持两种模式：
 
-同时内置**策略分析引擎**，可对存量代码库进行多层级深度分析，发现架构优化点并生成改进方案。
+- **Greenfield**：用自然语言描述需求，Agent 团队自动完成从 PRD 到部署的全链路交付
+- **Brownfield**：分析存量代码库，发现优化方向，生成 Plan，执行代码改进，持续迭代
 
 ## 架构
 
 ```
-🖥️  交互层 (CLI)      — Click + Rich，终端命令与进度展示
-🧭  编排层 (CrewAI)    — Greenfield 全链路开发 + Brownfield 策略分析
-🕸️  子流程层 (LangGraph) — 代码审查回路、测试失败重试
-🧰  工具层             — 文件/Git/Shell/Docker 安全封装
-💾  持久化层           — SQLite 元数据 + Git 仓库 + YAML 状态文件
-🧠  LLM 适配层         — LiteLLM 多模型路由 (DeepSeek + OpenAI)
+交互层 (CLI)      — Click + Rich，终端命令与进度展示
+编排层            — Greenfield 6 阶段流水线 + Brownfield 分析优化循环
+Agent 层          — 8 个 Agent，装饰器注册，工具可插拔
+工具层            — 10 个 CrewAI 兼容工具，自建流式 Tool Calling 引擎
+策略分析引擎       — Scanner(缓存+Re-check) → Analyzer(流式) → Workbench(对话+执行)
+记忆系统           — SQLite 向量+FTS5 混合检索，跨会话上下文
+持久化层           — SQLite 元数据 + YAML 状态 + JSONL 日志
+LLM 适配层         — LiteLLM 多模型路由 + 流式 Tool Calling + 成本追踪
 ```
 
 ## 快速开始
@@ -20,235 +23,237 @@
 ### 安装
 
 ```bash
-# 创建 conda 环境并安装
 conda create -n onep python=3.13 -y
 conda activate onep
 pip install -e .
-
-# 安装开发依赖（含测试框架）
 pip install -e ".[dev]"
 ```
 
 ### 配置
 
-#### API 密钥（.env 文件，推荐）
+#### API 密钥
 
-在项目根目录创建 `.env` 文件（已加入 `.gitignore`，不会被提交到 Git）：
-
-```bash
-cp .env.example .env
-```
-
-编辑 `.env` 填入真实的 API 密钥：
+在项目根目录创建 `.env` 文件：
 
 ```bash
-# DeepSeek
 DEEPSEEK_API_KEY=sk-your-deepseek-key
 DEEPSEEK_API_BASE=https://api.deepseek.com/v1
-
-# OpenAI
 OPENAI_API_KEY=sk-your-openai-key
 OPENAI_API_BASE=https://api.openai.com/v1
 ```
 
-环境变量优先级高于配置文件，推荐使用 `.env` 管理密钥。
+#### 模型配置
 
-#### 模型配置（~/.onep/config.yaml）
-
-首次运行会自动创建 `~/.onep/config.yaml`。模型路由规则：
-
-| 任务类型 | 使用模型 | 涵盖的 Agent |
-|---------|---------|------------|
-| 复杂任务 | `complex_model` | 产品经理、UI/UX 设计师、架构师、策略架构师 |
-| 常规任务 | `default_model` | 研发工程师、测试工程师、DevOps 工程师、代码分析师 |
+`~/.onep/config.yaml`（首次运行自动创建）：
 
 ```yaml
 llm:
-  # 常规任务（代码生成、测试、部署、扫描）
   default_model: deepseek/deepseek-chat
   default_provider: deepseek
-
-  # 复杂任务（需求分析、设计、架构、策略分析）
   complex_model: openai/gpt-4o
   complex_provider: openai
-
-  # 可选：为特定 Provider 配置额外模型
-  models: {}
-
+  pricing:
+    deepseek/deepseek-chat:   {input: 0.14, output: 0.28}
+    openai/gpt-4o:            {input: 2.50, output: 10.00}
 pipeline:
-  auto_approve: false     # 是否跳过人工审核点
-  max_retries: 3           # 测试/部署失败最大重试次数
-  test_timeout: 300        # 测试超时（秒）
+  auto_approve: false
+  max_retries: 3
 ```
 
-> **模型名格式**: `provider/model-name`，如 `openai/gpt-4o`、`openai/gpt-4.1`、`deepseek/deepseek-chat`、`deepseek/deepseek-v4-pro`。
+## 使用
 
-> **安全提示：** 不要在 `config.yaml` 中写入 API 密钥，也不要把 `.env` 文件提交到 Git。密钥统一通过环境变量管理。
-
-### 使用
+### Greenfield — 新建项目
 
 ```bash
-# Greenfield 模式：从零创建新项目
 onep create "做一个支持登录的记事本应用"
-
-# 运行开发流水线
 onep run myapp
-
-# 查看流水线状态
 onep status
-
-# 查看产物
 onep show prd myapp
-onep show architecture myapp
-
-# 流程控制
-onep pause myapp
-onep resume myapp
-onep approve myapp
+onep pause myapp / onep resume myapp / onep approve myapp
 ```
 
-### Brownfield 模式：存量代码分析
+### Brownfield — 存量代码分析+优化
 
 ```bash
-# 分析本地代码库的策略优化点
-onep analyze /path/to/existing/project
+# 分析代码库
+onep analyze ./repo --max-cost 5.00
 
-# 指定项目名称
-onep analyze ./my-repo -n my-analysis
+# 在 workbench 中交互
+/focus 3        # 选中优化方向
+/plan 3         # 生成优化 Plan
+/execute 3      # 执行代码改动+测试
+/rescan         # 重新扫描
 
-# 从 Git 仓库 URL 直接分析
-onep analyze https://github.com/user/repo.git -n repo-analysis
+# 全自动优化（可下班跑）
+onep optimize ./repo --max-rounds 5 --auto-approve low,medium --max-cost 20.00
 
-# 恢复之前的分析会话（进入交互式对话）
-onep strategy resume my-analysis
+# 导出报告
+onep export myproject
+onep export myproject --format json
 
-# 查看分析进度
-onep strategy status my-analysis
+# 恢复会话
+onep strategy resume myproject
+```
 
-# 导出分析报告
-onep strategy export my-analysis          # Markdown 格式
-onep strategy export my-analysis -f json  # JSON 格式
+### 管理命令
+
+```bash
+onep status              # 查看所有项目
+onep delete myproject    # 删除项目（名称匹配所有同名项目）
+onep delete abc123       # ID 前缀精确匹配
+onep memory status       # 记忆库统计
+onep memory search "缓存"
+onep memory import myproject
 ```
 
 ## Agent 团队
 
-| 角色 | 模型 | 职责 |
-|------|------|------|
-| 📋 产品经理 | 复杂模型 | 需求分析 → 用户故事 → 功能规格 → PRD |
-| 🎨 UI/UX 设计师 | 复杂模型 | 页面布局 → 交互流程 → 组件选型 → 视觉规范 |
-| 📐 架构师 | 复杂模型 | 系统架构 → 数据模型 → API 契约 → 技术选型 |
-| 💻 研发工程师 | 默认模型 | 后端 API + 前端页面 + Docker 配置 |
-| 🧪 测试工程师 | 默认模型 | 单元测试 + 集成测试 + 测试报告 |
-| 🚀 DevOps 工程师 | 默认模型 | Docker 部署 + 健康检查 + 部署日志 |
-| 🔍 代码分析师 | 默认模型 | 文件扫描 → 策略密集度识别 |
-| 🏗️ 策略架构师 | 复杂模型 | 深度分析 → 优化方向识别 → Plan 生成 |
+| Agent | 模型 | 职责 | 工具 |
+|-------|------|------|------|
+| 产品经理 | 复杂模型 | 需求分析 → PRD | — |
+| UI/UX 设计师 | 复杂模型 | 设计文档 | — |
+| 架构师 | 复杂模型 | 系统架构 + 技术方案 | file_read/write/list, grep, edit, memory |
+| 研发工程师 | 默认模型 | 代码实现 | file_read/write/list, edit, grep, shell, lint, memory |
+| 测试工程师 | 默认模型 | 测试编写+运行 | file_read/write, grep, shell, memory |
+| DevOps 工程师 | 默认模型 | Docker 部署 | file_read/write, shell, docker, memory |
+| 代码分析师 | 默认模型 | 文件扫描分类 | file_read/list, memory |
+| 策略架构师 | 复杂模型 | 深度分析+Plan+对话 | file_read/list, grep, memory |
 
-## 流水线
-
-### Greenfield（新建项目）
+## Brownfield 流水线
 
 ```
-用户需求
-  → Stage 1: 📋 产品经理 (PRD.md) [审核点]
-  → Stage 2: 🎨 UI/UX 设计师 (DESIGN.md)
-  → Stage 3: 📐 架构师 (ARCHITECTURE.md) [审核点]
-  → Stage 4: 💻 研发工程师 (源代码) [代码审查回路]
-  → Stage 5: 🧪 测试工程师 (测试报告) [失败重试回路]
-  → Stage 6: 🚀 DevOps 工程师 (部署)
-  → ✅ 交付
+源码
+  → Layer 1: 全量扫描（读文件完整内容 → LLM 分类 → hash 缓存）
+  → Layer 1B: Re-check（过滤误报，drop 明显不是策略的文件）
+  → Layer 2: 深度分析（策略架构师 + Tool Calling + 流式输出）
+  → Layer 3: 交互式对话
+      /list    — 查看优化方向
+      /focus   — 选中讨论
+      /plan    — 生成优化 Plan
+      /execute — 执行代码改动+测试（LLM 自主循环）
+      /rescan  — 重新扫描
+      /export  — 导出报告
 ```
 
-### Brownfield（存量代码分析）
+### Workbench 命令
 
+| 命令 | 功能 |
+|------|------|
+| `/list` | 查看所有优化方向 |
+| `/focus <n>` | 切换到第 n 个方向 |
+| `/search <kw>` | 搜索方向 |
+| `/plan <n>` | 生成标准版 Plan |
+| `/expand <n>` | 生成完整版 Plan |
+| `/approve <n>` | 审核 Plan |
+| `/execute <n>` | 执行开发+测试（LLM 自主：grep→read→edit→lint→test→fix） |
+| `/compare <n> <m>` | 对比两个方向 |
+| `/merge <n> <m>` | 合并两个方向 |
+| `/discard <n>` | 丢弃方向 |
+| `/read <file>` | 读取源码文件 |
+| `/ls <dir>` | 列出目录 |
+| `/rescan` | 重新扫描源码 |
+| `/status` | 查看进度 |
+| `/help` | 帮助 |
+| `/exit` | 保存退出 |
+
+## `onep optimize` — 全自动优化
+
+```bash
+onep optimize ./repo --max-rounds 5 --auto-approve low,medium --max-cost 20.00
 ```
-代码库
-  → Layer 1: 🔍 快速扫描 — 代码分析师 Agent 遍历文件，识别策略密集文件
-  → Layer 2: 🏗️ 深度分析 — 策略架构师 Agent 分析优化方向，生成 StrategyItem 列表
-  → Layer 3: 💬 交互式对话 — 11 个 slash 命令驱动的对话工作台，逐项审查与 Plan 生成
-  → 📋 导出报告 (Markdown / JSON)
+
+安全闸门：
+
+| 闸门 | 机制 |
+|------|------|
+| 影响级别 | `high` 必须人审，`low/medium` 自动执行 |
+| 测试 | 改动后跑 pytest，不通过自动 git revert |
+| 成本 | 超预算自动停 |
+
+输出：终端进度 + `optimize_log.jsonl` + `optimize_report.md`
+
+## 工具系统
+
+| 工具 | 功能 |
+|------|------|
+| `FileReadTool` | 读取文件 |
+| `FileWriteTool` | 写入文件 |
+| `EditTool` | 精确字符串替换（对齐 Claude Code Edit 行为） |
+| `FileListTool` | 列出目录 |
+| `GrepTool` | 跨文件搜索 |
+| `ShellTool` | 执行 shell 命令（破坏性命令自动拦截） |
+| `LintTool` | Ruff 代码检查 |
+| `GitTool` | Git 操作 |
+| `DockerTool` | Docker Compose |
+| `MemoryTool` | 记忆搜索+写入 |
+
+## 记忆系统
+
+跨会话持久化记忆，支持向量语义 + FTS5 关键词混合检索：
+
+```bash
+onep memory status
+onep memory search "缓存策略"
+onep memory import myproject
+onep memory clean
 ```
 
 ## 技术栈
 
-- **编排框架**: CrewAI + LangGraph
-- **CLI**: Click + Rich
-- **持久化**: SQLite + Git (GitPython) + YAML + JSONL
-- **LLM 适配**: LiteLLM (DeepSeek + OpenAI)，支持 .env 环境变量注入
-- **Agent 注册**: 装饰器驱动的可插拔注册表
-- **目标产物 (Greenfield)**: FastAPI + React (TypeScript) + Docker Compose
-- **策略分析 (Brownfield)**: 3 层管道 (Scanner → Analyzer → Workbench)
+- CLI: Click + Rich
+- LLM: LiteLLM (DeepSeek + OpenAI)，自建流式 Tool Calling 引擎
+- Agent: CrewAI Agent 定义 + 自研执行循环
+- 持久化: SQLite + YAML + JSONL
+- 向量检索: SQLite FTS5 + cosine similarity + MMR + temporal decay
 
 ## 项目结构
 
 ```
 onep/
-├── main.py                    # CLI 入口
-├── config.py                  # 全局配置 (~/.onep/config.yaml)
-├── cli/                       # 命令行模块 (可插拔)
-│   ├── analyze.py             # onep analyze — Brownfield 策略分析入口
-│   ├── create.py              # onep create / run
-│   ├── status.py              # onep status / pause / resume / approve / reject
-│   ├── show.py                # onep show (prd|design|architecture|report|log)
-│   └── strategy_cmd.py        # onep strategy resume / status / export
-├── orchestrator/              # CrewAI 编排层
-│   ├── crew.py                # Crew 工厂
-│   ├── greenfield.py          # Greenfield 6 阶段流水线
-│   ├── brownfield.py          # Brownfield 扫描+分析 Prompt 模板
-│   └── runner.py              # 流水线执行引擎
-├── agents/                    # Agent 定义
-│   ├── registry.py            # Agent 注册表 (装饰器模式)
+├── main.py
+├── config.py
+├── cli/
+│   ├── analyze.py            # onep analyze
+│   ├── optimize_cmd.py       # onep optimize
+│   ├── export_cmd.py         # onep export
+│   ├── create.py             # onep create / run
+│   ├── status.py             # onep status / pause / resume / delete
+│   ├── show.py               # onep show
+│   ├── strategy_cmd.py       # onep strategy
+│   └── memory_cmd.py         # onep memory
+├── orchestrator/
+│   ├── greenfield.py, brownfield.py
+│   ├── runner.py, crew.py
+├── agents/
+│   ├── registry.py
 │   ├── pm.py, designer.py, architect.py
 │   ├── developer.py, tester.py, devops.py
-│   ├── analyzer.py            # 代码分析师（策略扫描）
-│   └── strategy_architect.py  # 策略架构师（深度分析）
-├── strategy/                  # 策略分析引擎
-│   ├── models.py              # 数据模型 (StrategyItem, WorkbenchState, ItemStatus)
-│   ├── scanner.py             # Layer 1: 文件遍历、批量扫描、JSONL 解析
-│   ├── analyzer.py            # Layer 2: LLM 响应解析 → StrategyItem
-│   ├── workbench.py           # Layer 3: 交互式对话工作台 (11 slash 命令)
-│   ├── planner.py             # Plan 生成器 (standard / full)
-│   └── persistence.py         # YAML (workbench.yaml) + JSONL (dialogue.jsonl)
-├── subflows/                  # LangGraph 子流程
-│   ├── code_review.py         # 代码审查回路
-│   └── test_retry.py          # 测试失败重试回路
-├── tools/                     # 工具层
-│   ├── filesystem.py, git.py, shell.py
-│   ├── docker.py, lint.py
-├── persistence/               # 持久化层
-│   ├── database.py, state.py, models.py
-└── llm/                       # LLM 适配层
-    ├── router.py              # 模型路由
-    └── adapters.py            # LiteLLM 适配器
+│   ├── analyzer.py, strategy_architect.py
+├── strategy/
+│   ├── scanner.py, scan_cache.py, analyzer.py
+│   ├── workbench.py, planner.py, persistence.py
+│   ├── models.py, pipeline_state.py, retry.py
+│   ├── optimize_engine.py, project_context.py
+├── tools/
+│   ├── filesystem.py, edit.py, grep.py
+│   ├── git.py, shell.py, docker.py, lint.py
+│   └── memory.py
+├── memory/
+│   ├── schema.py, embeddings.py, manager.py
+│   ├── search.py, query_expansion.py
+│   ├── hooks.py, context.py
+├── llm/
+│   ├── adapters.py, router.py, cost.py
+└── persistence/
+    ├── database.py, models.py, state.py
 ```
-
-## 命令速查
-
-| 命令 | 说明 |
-|------|------|
-| `onep create <需求>` | Greenfield：用自然语言创建新项目 |
-| `onep run <项目>` | 运行开发流水线 |
-| `onep status` | 查看所有项目流水线进度 |
-| `onep pause/resume <项目>` | 暂停/恢复流水线 |
-| `onep approve/reject <项目>` | 通过/拒绝当前审核点 |
-| `onep show <产物> <项目>` | 查看产物 (prd/design/architecture/report/log) |
-| `onep analyze <路径\|URL>` | Brownfield：分析存量代码库 |
-| `onep strategy resume <项目>` | 恢复策略分析会话 |
-| `onep strategy status <项目>` | 查看策略分析进度 |
-| `onep strategy export <项目>` | 导出分析报告 |
 
 ## 开发
 
 ```bash
-# 激活 conda 环境
 conda activate onep
-
-# 安装开发依赖
 pip install -e ".[dev]"
-
-# 运行测试
-pytest tests/ -v
-
-# 运行 CLI
+pytest tests/ -v          # 175 tests
 python -m onep.main --help
 ```
 

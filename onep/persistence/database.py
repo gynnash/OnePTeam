@@ -169,6 +169,19 @@ def update_stage_run(sr: StageRun) -> None:
     conn.close()
 
 
+def delete_project(project_id: str) -> bool:
+    """Delete a project and its related records. Returns True if deleted."""
+    conn = _connect()
+    conn.execute("DELETE FROM conversations WHERE project_id=?", (project_id,))
+    conn.execute("DELETE FROM approvals WHERE stage_run_id IN (SELECT id FROM stage_runs WHERE project_id=?)", (project_id,))
+    conn.execute("DELETE FROM stage_runs WHERE project_id=?", (project_id,))
+    conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+    deleted = conn.total_changes > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
 def get_latest_stage_run(
     project_id: str, stage_name: str
 ) -> Optional[StageRun]:

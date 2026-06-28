@@ -219,8 +219,17 @@ class LLMAdapter:
                 yield {"type": "done", "usage": self.usage}
                 return
 
-        # max rounds reached
-        yield {"type": "done", "usage": self.usage}
+            # one round before limit: nudge model to produce output
+            if rounds == max_tool_rounds - 1:
+                messages.append({
+                    "role": "user",
+                    "content": "请基于已读取的文件，立即输出最终分析结果。不要再调用工具。",
+                })
+
+        # max rounds reached — ask for final output
+        if rounds >= max_tool_rounds:
+            yield {"type": "done", "usage": self.usage}
+            return
 
     def _capture_usage(self, response: Any) -> None:
         if hasattr(response, "usage") and response.usage:
