@@ -7,6 +7,7 @@ from pathlib import Path
 from onep.strategy.models import StrategyItem
 from onep.strategy.persistence import save_plan
 from onep.memory.context import append_memory_context
+from onep.strategy.gates import validate_focused_test_commands
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ Do not wrap the JSON in Markdown fences.""",
         path = Path(relative)
         if path.is_absolute() or ".." in path.parts:
             raise ValueError(f"Plan expected_files path is unsafe: {relative}")
+    validate_focused_test_commands(list_fields["test_commands"])
     plan_id = f"{plan_index:03d}-{item.title.replace(' ', '-')[:50]}"
     plan_path = save_plan(workspace, plan_id, markdown)
     item.draft_plan(plan_path)

@@ -21,13 +21,12 @@ _SHARED_FLAGS = {
 class PlanScheduler:
     def fingerprint(self, candidate: PlanCandidate) -> str:
         payload = {
-            "title": " ".join(candidate.title.lower().split()),
-            "summary": " ".join(candidate.summary.lower().split()),
-            "primary_file": (
-                sorted(str(path).lower() for path in candidate.files)[0]
-                if candidate.files else ""
-            ),
+            "title_tokens": sorted(set(
+                word for word in candidate.title.lower().split() if len(word) > 2
+            )),
+            "files": sorted(str(path).lower() for path in candidate.files),
             "tags": sorted(tag.lower() for tag in candidate.tags),
+            "risk_flags": sorted(candidate.risk_flags),
         }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True).encode()
@@ -71,21 +70,8 @@ class PlanScheduler:
             if missing:
                 raise ValueError(f"unknown dependency: {sorted(missing)[0]}")
         self._validate_acyclic(candidates)
-        levels: dict[str, int] = {}
-        for index, candidate in enumerate(candidates):
-            dependency_levels = [
-                levels[dependency] + 1 for dependency in candidate.dependencies
-            ]
-            if candidate.dependencies and index:
-                dependency_levels.append(
-                    max(levels[earlier.id] for earlier in candidates[:index]) + 1
-                )
-            conflict_levels = [
-                levels[earlier.id] + 1
-                for earlier in candidates[:index]
-                if self._conflict(earlier, candidate)
-            ]
-            levels[candidate.id] = max(dependency_levels + conflict_levels + [0])
+        graph = self._execution_graph(candidates)
+        levels = self._topological_levels(graph)
         groups: list[list[PlanCandidate]] = []
         for candidate in candidates:
             level = levels[candidate.id]
@@ -93,6 +79,72 @@ class PlanScheduler:
                 groups.append([])
             groups[level].append(candidate)
         return groups
+
+    def _execution_graph(
+        self, candidates: list[PlanCandidate]
+    ) -> dict[str, set[str]]:
+        """Build dependency edges plus deterministic conflict ordering."""
+        graph = {candidate.id: set() for candidate in candidates}
+        for candidate in candidates:
+            for dependency in candidate.dependencies:
+                if dependency in graph:
+                    graph[dependency].add(candidate.id)
+
+        # A dependent plan must start from a baseline that already contains all
+        # earlier scheduled work. Preserve that conservative ordering without
+        # creating a cycle when the dependency itself appears later.
+        for index, candidate in enumerate(candidates):
+            if not candidate.dependencies:
+                continue
+            for earlier in candidates[:index]:
+                if not self._reachable(graph, candidate.id, earlier.id):
+                    graph[earlier.id].add(candidate.id)
+
+        for index, left in enumerate(candidates):
+            for right in candidates[index + 1:]:
+                if not self._conflict(left, right):
+                    continue
+                if self._reachable(graph, left.id, right.id):
+                    continue
+                if self._reachable(graph, right.id, left.id):
+                    continue
+                graph[left.id].add(right.id)
+        return graph
+
+    @staticmethod
+    def _reachable(graph: dict[str, set[str]], start: str, target: str) -> bool:
+        pending = [start]
+        seen = set()
+        while pending:
+            node = pending.pop()
+            if node == target:
+                return True
+            if node in seen:
+                continue
+            seen.add(node)
+            pending.extend(graph[node])
+        return False
+
+    @staticmethod
+    def _topological_levels(graph: dict[str, set[str]]) -> dict[str, int]:
+        incoming = {node: 0 for node in graph}
+        for targets in graph.values():
+            for target in targets:
+                incoming[target] += 1
+        ready = [node for node in graph if incoming[node] == 0]
+        levels = {node: 0 for node in ready}
+        visited = 0
+        while ready:
+            node = ready.pop(0)
+            visited += 1
+            for target in graph[node]:
+                levels[target] = max(levels.get(target, 0), levels[node] + 1)
+                incoming[target] -= 1
+                if incoming[target] == 0:
+                    ready.append(target)
+        if visited != len(graph):
+            raise ValueError("dependency cycle detected")
+        return levels
 
     def integration_order(
         self, candidates: list[PlanCandidate]

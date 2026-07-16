@@ -91,7 +91,8 @@ def install_fake_optimize_services(monkeypatch, tmp_path):
         config.set_value("user", "name", "test")
         config.set_value("user", "email", "test@example.com")
     (source / "app.py").write_text("value = 1\n")
-    repo.index.add(["app.py"])
+    (source / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+    repo.index.add(["app.py", "pyproject.toml"])
     repo.index.commit("initial")
 
     root = tmp_path / "onep-home"
@@ -105,7 +106,7 @@ def install_fake_optimize_services(monkeypatch, tmp_path):
     generated = []
     analyzed_paths = []
 
-    def analyze(path, llm, tracker, project_name=""):
+    def analyze(path, llm, tracker, project_name="", source_files=None):
         analyzed_paths.append(Path(path))
         return [
             StrategyItem(
@@ -141,7 +142,7 @@ def install_fake_optimize_services(monkeypatch, tmp_path):
     monkeypatch.setattr("onep.cli.optimize_cmd._analyze", analyze)
     monkeypatch.setattr("onep.cli.optimize_cmd.generate_optimize_plan", generate)
     monkeypatch.setattr("onep.cli.optimize_cmd._memory_context", lambda *a: "")
-    monkeypatch.setattr("onep.cli.optimize_cmd.load_project_context", lambda *a: "")
+    monkeypatch.setattr("onep.cli.optimize_cmd.build_project_context", lambda *a: "")
     return SimpleNamespace(
         source=source,
         generated=generated,

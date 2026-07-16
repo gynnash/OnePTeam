@@ -43,6 +43,7 @@ EXPECTED_ALLOWED_TRANSITIONS = {
     },
     PlanStatus.DEVELOPING: {
         PlanStatus.TESTING,
+        PlanStatus.FIXING,
         PlanStatus.FAILED,
     },
     PlanStatus.TESTING: {
@@ -109,6 +110,7 @@ def test_enum_values_serialize_as_stable_strings() -> None:
         files={Path("onep/strategy/optimize_models.py")},
         dependencies={"plan-foundation"},
         test_commands=("pytest tests/test_strategy/test_optimize_models.py",),
+        focused_test_commands=("pytest tests/test_strategy/test_plan_scheduler.py",),
     )
     plan = PlanRecord(candidate=candidate, status=PlanStatus.PLANNED)
     run = RunRecord(
@@ -128,6 +130,9 @@ def test_enum_values_serialize_as_stable_strings() -> None:
     ]
     assert payload["plans"][0]["candidate"]["dependencies"] == [
         "plan-foundation"
+    ]
+    assert payload["plans"][0]["candidate"]["focused_test_commands"] == [
+        "pytest tests/test_strategy/test_plan_scheduler.py"
     ]
     json.dumps(payload)
 
@@ -341,6 +346,7 @@ def test_from_dict_normalizes_null_containers_and_optional_values() -> None:
     assert plan.candidate.files == set()
     assert plan.candidate.dependencies == set()
     assert plan.candidate.test_commands == ()
+    assert plan.candidate.focused_test_commands == ()
     assert plan.status is PlanStatus.PENDING
     assert plan.failure_reason is None
     assert plan.attempts == []

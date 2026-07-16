@@ -57,6 +57,8 @@ class FailureReason(str, Enum):
     ROLLBACK_FAILED = "rollback_failed"
     REGRESSION_DETECTED = "regression_detected"
     INVALID_PLAN_METADATA = "invalid_plan_metadata"
+    SCOPE_VIOLATION = "scope_violation"
+    STUCK = "stuck"
 
 
 def _now() -> str:
@@ -307,7 +309,10 @@ class PlanCandidate:
     impact: str = "medium"
     files: set[Path] = field(default_factory=set)
     dependencies: set[str] = field(default_factory=set)
+    # Commands supplied by the user or project configuration. These are gates
+    # and must never be replaced by model-proposed focused tests.
     test_commands: tuple[str, ...] = ()
+    focused_test_commands: tuple[str, ...] = ()
     fingerprint: str = ""
     risk_flags: set[str] = field(default_factory=set)
     discovery_index: int = 0
@@ -322,6 +327,7 @@ class PlanCandidate:
             "files": _serialize(self.files),
             "dependencies": _serialize(self.dependencies),
             "test_commands": list(self.test_commands),
+            "focused_test_commands": list(self.focused_test_commands),
             "fingerprint": self.fingerprint,
             "risk_flags": _serialize(self.risk_flags),
             "discovery_index": self.discovery_index,
@@ -340,6 +346,9 @@ class PlanCandidate:
             },
             dependencies=set(_container_or_empty(data, "dependencies")),
             test_commands=tuple(_container_or_empty(data, "test_commands")),
+            focused_test_commands=tuple(
+                _container_or_empty(data, "focused_test_commands")
+            ),
             fingerprint=_string_or_default(data, "fingerprint"),
             risk_flags=set(_container_or_empty(data, "risk_flags")),
             discovery_index=int(data.get("discovery_index") or 0),
@@ -368,6 +377,7 @@ _ALLOWED_PLAN_TRANSITIONS: dict[PlanStatus, set[PlanStatus]] = {
     },
     PlanStatus.DEVELOPING: {
         PlanStatus.TESTING,
+        PlanStatus.FIXING,
         PlanStatus.FAILED,
     },
     PlanStatus.TESTING: {

@@ -41,6 +41,16 @@ def test_duplicate_fingerprint_is_scheduled_once():
     assert len(PlanScheduler().new_candidates([first, duplicate], set())) == 1
 
 
+def test_fingerprint_ignores_summary_rewording():
+    first = candidate("a", ["a.py"])
+    second = candidate("b", ["a.py"])
+    second.title = first.title
+    first.summary = "verbose first wording"
+    second.summary = "different explanation of the same evidence"
+    scheduler = PlanScheduler()
+    assert scheduler.fingerprint(first) == scheduler.fingerprint(second)
+
+
 def test_unknown_dependency_is_rejected():
     import pytest
 
@@ -72,3 +82,25 @@ def test_dependency_cycle_is_rejected():
             candidate("a", ["a.py"], ["b"]),
             candidate("b", ["b.py"], ["a"]),
         ])
+
+
+def test_forward_dependency_is_topologically_scheduled():
+    groups = PlanScheduler().groups([
+        candidate("consumer", ["consumer.py"], ["foundation"]),
+        candidate("foundation", ["foundation.py"]),
+    ])
+    assert [[item.id for item in group] for group in groups] == [
+        ["foundation"],
+        ["consumer"],
+    ]
+
+
+def test_forward_dependency_wins_over_file_conflict_order():
+    groups = PlanScheduler().groups([
+        candidate("consumer", ["shared.py"], ["foundation"]),
+        candidate("foundation", ["shared.py"]),
+    ])
+    assert [[item.id for item in group] for group in groups] == [
+        ["foundation"],
+        ["consumer"],
+    ]

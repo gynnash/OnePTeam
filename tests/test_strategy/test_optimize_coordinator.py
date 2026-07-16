@@ -90,6 +90,47 @@ def _candidate():
     )
 
 
+def test_focused_tests_run_before_required_gate():
+    runner = Sequence([_tests(True)])
+    candidate = _candidate()
+    candidate.focused_test_commands = ("pytest focused",)
+    coordinator = OptimizeCoordinator(
+        engine=FakeEngine(),
+        test_runner=runner,
+        reviewer=Sequence([ReviewResult(True, "ok")]),
+        git_session=FakeGit(),
+    )
+    captured = []
+
+    def run(_worktree, commands):
+        captured.append(commands)
+        return _tests(True)
+
+    runner.run = run
+    result = coordinator.execute_plan(candidate, "# plan")
+    assert result.status == PlanStatus.INTEGRATED
+    assert captured[0] == ["pytest focused", "pytest"]
+
+
+def test_unexpected_file_change_requests_repair_before_tests():
+    git = FakeGit()
+    git.plan.changed = ["outside.py"]
+    engine = FakeEngine()
+    runner = Sequence([])
+    result = OptimizeCoordinator(
+        engine=engine,
+        test_runner=runner,
+        reviewer=Sequence([]),
+        git_session=git,
+        max_attempts=2,
+    ).execute_plan(_candidate(), "# plan")
+
+    assert result.status == PlanStatus.ROLLED_BACK
+    assert result.failure_reason.value == "scope_violation"
+    assert len(result.attempts) == 2
+    assert "outside.py" in engine.feedback[1]
+
+
 def test_review_failure_is_repaired_on_same_branch():
     git = FakeGit()
     engine = FakeEngine()
@@ -107,7 +148,8 @@ def test_review_failure_is_repaired_on_same_branch():
     result = coordinator.execute_plan(_candidate(), "# plan")
 
     assert result.status == PlanStatus.INTEGRATED
-    assert engine.feedback == ["", "app.py:1: race"]
+    assert engine.feedback[0] == ""
+    assert "app.py:1: race" in engine.feedback[1]
     assert git.plan.commits == 1
     assert git.integrated == ["commit"]
 
@@ -123,7 +165,7 @@ def test_three_test_failures_roll_back_without_commit():
     )
     result = coordinator.execute_plan(_candidate(), "# plan")
     assert result.status == PlanStatus.ROLLED_BACK
-    assert result.failure_reason.value == "fix_attempts_exhausted"
+    assert result.failure_reason.value == "stuck"
     assert len(result.attempts) == 3
     assert git.plan.commits == 0
     assert git.plan.rollbacks == 1

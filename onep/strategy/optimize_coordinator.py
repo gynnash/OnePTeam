@@ -17,6 +17,12 @@ from onep.strategy.optimize_models import (
 from onep.llm.router import resolve_model
 from onep.llm.cost import estimate_call_cost
 from onep.config import load_config
+from onep.strategy.gates import PatchScopeGate, combined_test_commands
+from onep.strategy.repair import (
+    AttemptStagnationDetector,
+    RepairBrief,
+    previous_tool_actions,
+)
 
 
 class OptimizeCoordinator:
@@ -33,6 +39,8 @@ class OptimizeCoordinator:
         project_context: str = "",
         llm_reservation: float | None = None,
         memory_context: str = "",
+        scope_gate=None,
+        stagnant_attempt_limit: int = 3,
     ):
         self.engine = engine
         self.test_runner = test_runner
@@ -45,6 +53,8 @@ class OptimizeCoordinator:
         self.project_context = project_context
         self.llm_reservation = llm_reservation
         self.memory_context = memory_context
+        self.scope_gate = scope_gate or PatchScopeGate()
+        self.stagnant_attempt_limit = stagnant_attempt_limit
         self._reservation_prompt = ""
         self._reserved_amount = 0.0
 
@@ -98,6 +108,7 @@ class OptimizeCoordinator:
             self.recorder.save_plan(record, plan_text)
         feedback = ""
         last_reason = FailureReason.FIX_ATTEMPTS_EXHAUSTED
+        stagnation = AttemptStagnationDetector(self.stagnant_attempt_limit)
 
         for number in range(1, self.max_attempts + 1):
             if self.cost_tracker and (
@@ -126,6 +137,11 @@ class OptimizeCoordinator:
                         llm_adapter=self.llm,
                         feedback=feedback,
                         memory_context=self.memory_context,
+                        event_sink=lambda event: self._event(
+                            "loop_event",
+                            record,
+                            {"attempt": number, "event": event},
+                        ),
                     )
                 except Exception as exc:
                     attempt = AttemptRecord(
@@ -150,16 +166,38 @@ class OptimizeCoordinator:
                 base_commit=session.base_commit,
                 changed_files={Path(path) for path in changed},
                 feedback=[feedback] if feedback else [],
-                artifacts={"developer_output": result.output},
+                artifacts={
+                    "developer_output": result.output,
+                    "trajectory": list(getattr(result, "events", ())),
+                    "termination_reason": getattr(
+                        result, "termination_reason", "completed"
+                    ),
+                },
             )
             if developer_cost:
                 attempt.token_usage.append(developer_cost)
                 attempt.stage_costs["optimize_developer"] = developer_cost["cost"]
             if not changed:
-                feedback = "No files changed."
-                last_reason = FailureReason.NO_CHANGES
+                if getattr(result, "termination_reason", "") == "stuck":
+                    raw_feedback = "Developer loop became stuck before changing files."
+                    last_reason = FailureReason.STUCK
+                else:
+                    raw_feedback = "No files changed."
+                    last_reason = FailureReason.NO_CHANGES
+                feedback, stalled = self._repair_feedback(
+                    attempt,
+                    "developer_stuck" if last_reason == FailureReason.STUCK
+                    else "no_changes",
+                    raw_feedback,
+                    candidate,
+                    session,
+                    stagnation,
+                )
                 attempt.ended_at = datetime.now(timezone.utc).isoformat()
-                attempt.status = "no_changes"
+                attempt.status = (
+                    "stuck" if last_reason == FailureReason.STUCK
+                    else "no_changes"
+                )
                 attempt.cost = sum(
                     cost for cost in attempt.stage_costs.values()
                     if cost is not None
@@ -167,15 +205,48 @@ class OptimizeCoordinator:
                 record.attempts.append(attempt)
                 self._persist_attempt(record, attempt, plan_text)
                 self._event("repair_requested", record, {"attempt": number})
+                if stalled:
+                    last_reason = FailureReason.STUCK
+                    break
                 if number < self.max_attempts:
-                    record.transition_to(PlanStatus.TESTING)
                     record.transition_to(PlanStatus.FIXING)
                     continue
                 continue
 
+            scope = self.scope_gate.check(candidate, changed)
+            if not scope.passed:
+                feedback, stalled = self._repair_feedback(
+                    attempt,
+                    "scope_violation",
+                    scope.feedback,
+                    candidate,
+                    session,
+                    stagnation,
+                )
+                last_reason = FailureReason.SCOPE_VIOLATION
+                attempt.ended_at = datetime.now(timezone.utc).isoformat()
+                attempt.status = "scope_violation"
+                attempt.artifacts["unexpected_files"] = list(
+                    scope.unexpected_files
+                )
+                record.attempts.append(attempt)
+                self._persist_attempt(record, attempt, plan_text)
+                self._event("scope_gate_completed", record, {
+                    "attempt": number,
+                    "passed": False,
+                    "unexpected_files": list(scope.unexpected_files),
+                })
+                if stalled:
+                    last_reason = FailureReason.STUCK
+                    break
+                if number < self.max_attempts:
+                    record.transition_to(PlanStatus.FIXING)
+                    continue
+                break
+
             record.transition_to(PlanStatus.TESTING)
             tests = self.test_runner.run(
-                session.worktree, list(candidate.test_commands)
+                session.worktree, combined_test_commands(candidate)
             )
             attempt.test_results = tests.commands
             if not tests.passed:
@@ -186,15 +257,31 @@ class OptimizeCoordinator:
                     cost for cost in attempt.stage_costs.values()
                     if cost is not None
                 )
-                feedback = "\n".join(
+                raw_feedback = "\n".join(
                     command.stderr or command.stdout
                     for command in tests.commands if not command.passed
                 ) or "Tests failed."
+                failed_command = next(
+                    (command.command for command in tests.commands if not command.passed),
+                    "",
+                )
+                feedback, stalled = self._repair_feedback(
+                    attempt,
+                    "test_failed",
+                    raw_feedback,
+                    candidate,
+                    session,
+                    stagnation,
+                    failed_command,
+                )
                 record.attempts.append(attempt)
                 self._persist_attempt(record, attempt, plan_text)
                 self._event("tests_completed", record, {
                     "attempt": number, "passed": False,
                 })
+                if stalled:
+                    last_reason = FailureReason.STUCK
+                    break
                 if number < self.max_attempts:
                     record.transition_to(PlanStatus.FIXING)
                     self._event("repair_requested", record, {
@@ -243,7 +330,22 @@ class OptimizeCoordinator:
             })
             if not review.passed:
                 last_reason = FailureReason.REVIEW_FAILED
-                feedback = "\n".join(review.findings) or review.summary
+                raw_feedback = "\n".join(
+                    str(finding) for finding in review.findings
+                ) or review.summary
+                feedback, stalled = self._repair_feedback(
+                    attempt,
+                    "review_failed",
+                    raw_feedback,
+                    candidate,
+                    session,
+                    stagnation,
+                )
+                # Refresh the just-persisted attempt with the repair evidence.
+                self._persist_attempt(record, attempt, plan_text)
+                if stalled:
+                    last_reason = FailureReason.STUCK
+                    break
                 if number < self.max_attempts:
                     record.transition_to(PlanStatus.FIXING)
                     self._event("repair_requested", record, {
@@ -378,6 +480,33 @@ class OptimizeCoordinator:
             self.recorder.save_review(
                 item_id, attempt.number, attempt.review
             )
+
+    def _repair_feedback(
+        self,
+        attempt: AttemptRecord,
+        failure_type: str,
+        raw_feedback: str,
+        candidate: PlanCandidate,
+        session,
+        stagnation: AttemptStagnationDetector,
+        failing_command: str = "",
+    ) -> tuple[str, bool]:
+        events = tuple(attempt.artifacts.get("trajectory") or ())
+        brief = RepairBrief.build(
+            failure_type=failure_type,
+            raw_error=raw_feedback,
+            relevant_files=[str(path) for path in candidate.files],
+            diff=session.diff(),
+            previous_actions=previous_tool_actions(events),
+            failing_command=failing_command,
+        )
+        attempt.artifacts["repair_brief"] = brief.to_dict()
+        stalled = stagnation.observe(brief)
+        if stalled:
+            attempt.artifacts["stuck_reason"] = (
+                "unchanged_diff_and_failure_signature"
+            )
+        return brief.to_prompt(), stalled
 
     def _reserve_budget(self, stage: str) -> bool:
         if not self.cost_tracker:

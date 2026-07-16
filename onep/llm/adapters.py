@@ -12,6 +12,7 @@ from litellm import completion
 from rich.console import Console
 
 from onep.llm.router import resolve_model, get_api_key, get_api_base
+from onep.llm.trajectory import StuckDetector, TrajectoryRecorder, TrajectorySink
 
 console = Console()
 
@@ -93,6 +94,8 @@ class LLMAdapter:
         tools: list,
         stage_name: str,
         max_tool_rounds: int = 8,
+        trajectory_sink: TrajectorySink | None = None,
+        stuck_detector: StuckDetector | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Stream LLM response with tool calling support.
 
@@ -105,6 +108,8 @@ class LLMAdapter:
           usage: TokenUsage (for done only)
         """
         self.reset_usage()
+        trajectory = TrajectoryRecorder(trajectory_sink)
+        detector = stuck_detector or StuckDetector()
         model_name, provider = resolve_model(stage_name)
         api_key = get_api_key(provider)
         api_base = get_api_base(provider)
@@ -120,6 +125,7 @@ class LLMAdapter:
         rounds = 0
         while rounds < max_tool_rounds:
             rounds += 1
+            trajectory.emit("model_round_started", round=rounds)
             kwargs: dict = {
                 "model": model_name,
                 "messages": messages,
@@ -193,6 +199,24 @@ class LLMAdapter:
                     # execute tool
                     tool = tool_map.get(tc_data["name"])
                     if tool:
+                        stuck_reason = detector.observe_call(
+                            tc_data["name"], args
+                        )
+                        trajectory.emit(
+                            "tool_requested",
+                            round=rounds,
+                            tool_name=tc_data["name"],
+                            tool_args=args,
+                        )
+                        if stuck_reason:
+                            trajectory.emit("loop_stuck", reason=stuck_reason)
+                            yield {"type": "stuck", "reason": stuck_reason}
+                            yield {
+                                "type": "done",
+                                "usage": self.usage,
+                                "termination_reason": "stuck",
+                            }
+                            return
                         yield {
                             "type": "tool_call",
                             "tool_name": tc_data["name"],
@@ -204,11 +228,29 @@ class LLMAdapter:
                             result = f"Error: {e}"
                         if len(result) > 4000:
                             result = result[:4000] + "\n... (truncated)"
+                        trajectory.emit(
+                            "tool_completed",
+                            round=rounds,
+                            tool_name=tc_data["name"],
+                            tool_result=result,
+                        )
                         yield {
                             "type": "tool_call_result",
                             "tool_name": tc_data["name"],
                             "tool_result": result,
                         }
+                        stuck_reason = detector.observe_result(
+                            tc_data["name"], str(result)
+                        )
+                        if stuck_reason:
+                            trajectory.emit("loop_stuck", reason=stuck_reason)
+                            yield {"type": "stuck", "reason": stuck_reason}
+                            yield {
+                                "type": "done",
+                                "usage": self.usage,
+                                "termination_reason": "stuck",
+                            }
+                            return
                         tool_results.append({
                             "role": "tool",
                             "tool_call_id": tc_data["id"],
@@ -227,7 +269,12 @@ class LLMAdapter:
                 messages.extend(tool_results)
             else:
                 # no tool calls — model is done
-                yield {"type": "done", "usage": self.usage}
+                trajectory.emit("loop_completed", rounds=rounds)
+                yield {
+                    "type": "done",
+                    "usage": self.usage,
+                    "termination_reason": "completed",
+                }
                 return
 
             # one round before limit: nudge model to produce output
@@ -239,7 +286,13 @@ class LLMAdapter:
 
         # max rounds reached — ask for final output
         if rounds >= max_tool_rounds:
-            yield {"type": "done", "usage": self.usage}
+            trajectory.emit("loop_limit_reached", rounds=rounds)
+            yield {"type": "limit_reached", "rounds": rounds}
+            yield {
+                "type": "done",
+                "usage": self.usage,
+                "termination_reason": "tool_round_limit",
+            }
             return
 
     def _capture_usage(self, response: Any) -> None:

@@ -89,6 +89,38 @@ def load_project_context(workspace: Path, source_path: str = "") -> str:
     return ""
 
 
+def build_project_context(source_path: str, workspace: Path) -> str:
+    """Build deterministic context and merge project-authored instructions."""
+    sp = Path(source_path)
+    py_files = list(sp.rglob("*.py"))
+    ts_files = list(sp.rglob("*.ts")) + list(sp.rglob("*.tsx"))
+    top_dirs = sorted(
+        path.name for path in sp.iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+        and path.name not in ("node_modules", "__pycache__")
+    )
+    setup_files = []
+    for pattern in ("main.py", "app.py", "index.ts", "index.tsx", "cli.py"):
+        setup_files.extend(
+            str(path.relative_to(sp)) for path in list(sp.rglob(pattern))[:3]
+        )
+    context = _fallback_context(
+        source_path,
+        py_files,
+        ts_files,
+        top_dirs,
+        setup_files,
+        (sp / "pyproject.toml").exists(),
+        (sp / "package.json").exists(),
+        (sp / "Dockerfile").exists() or (sp / "docker-compose.yml").exists(),
+    )
+    context = merge_manual_context(source_path, context)
+    path = workspace / "project_context.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(context, encoding="utf-8")
+    return context
+
+
 def merge_manual_context(source_path: str, auto_context: str) -> str:
     """Merge CLAUDE.md or ONEP.md content into project context."""
     sp = Path(source_path)

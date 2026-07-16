@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
 
 from rich.console import Console
 from onep.strategy.models import StrategyItem
@@ -107,6 +108,7 @@ class OptimizeEngine:
         llm_adapter,
         feedback: str = "",
         memory_context: str = "",
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> "EngineAttemptResult":
         if llm_adapter is None:
             raise RuntimeError("LLM not available")
@@ -133,27 +135,55 @@ class OptimizeEngine:
         ctx = load_project_context(Path(workspace), source_path)
         if ctx:
             prompt += f"\n\n## 项目上下文\n\n{ctx[:4000]}"
+        events: list[dict[str, Any]] = []
+
+        def capture(event: dict[str, Any]) -> None:
+            events.append(event)
+            if event_sink:
+                event_sink(event)
+
         output = _invoke_stream(
             llm_adapter, "developer", prompt, source_path,
             model_stage="optimize_developer",
+            event_sink=capture,
+            agent_mode="repair" if feedback else "brownfield",
         )
-        return EngineAttemptResult(output=output or "")
+        termination_reason = "completed"
+        if events and events[-1]["type"] == "loop_limit_reached":
+            termination_reason = "tool_round_limit"
+        stuck = next(
+            (event for event in reversed(events) if event["type"] == "loop_stuck"),
+            None,
+        )
+        if stuck:
+            termination_reason = "stuck"
+        return EngineAttemptResult(
+            output=output or "",
+            events=tuple(events),
+            termination_reason=termination_reason,
+        )
 
 
 def _invoke_stream(llm_adapter, agent_name: str, prompt: str,
-                   source_path: str, model_stage: str | None = None) -> str:
+                   source_path: str, model_stage: str | None = None,
+                   event_sink=None, agent_mode: str = "brownfield") -> str:
     """Invoke agent with tools and streaming output."""
     from onep.agents.registry import get_agent
     from onep.llm.router import resolve_model
 
-    agent = get_agent(agent_name, workspace=source_path, source_id="")
+    agent = get_agent(
+        agent_name,
+        workspace=source_path,
+        source_id="",
+        mode=agent_mode,
+    )
     system_prompt = (
         f"{agent.role}\n\n"
         f"目标: {agent.goal}\n\n"
         f"背景: {agent.backstory}\n\n"
         f"你可以使用 grep 搜索代码，用 file_read 读取文件，用 file_write 修改代码，"
         f"用 shell 运行命令，用 lint 检查代码质量。"
-        f"遇到错误要自己排查修复，不要放弃。"
+        f"每次操作必须服务于当前 Plan；证据不足或达到限制时明确停止并报告原因。"
     )
     tools = getattr(agent, "tools", []) or []
     stage_name = model_stage or agent_name
@@ -170,6 +200,7 @@ def _invoke_stream(llm_adapter, agent_name: str, prompt: str,
         tools=tools,
         stage_name=stage_name,
         max_tool_rounds=15,
+        trajectory_sink=event_sink,
     ):
         if event["type"] == "tool_call":
             args_str = ", ".join(
@@ -212,3 +243,5 @@ def _extract_files(output: str) -> list[str]:
 @dataclass(frozen=True)
 class EngineAttemptResult:
     output: str
+    events: tuple[dict[str, Any], ...] = ()
+    termination_reason: str = "completed"

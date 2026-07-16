@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from crewai.tools import BaseTool
+from onep.runtime.environment import LocalWorktreeEnvironment
 
 
 class FileReadTool(BaseTool):
@@ -13,12 +14,12 @@ class FileReadTool(BaseTool):
     workspace: str = ""
 
     def _run(self, path: str) -> str:
-        full = (Path(self.workspace) / path).resolve()
-        if not str(full).startswith(str(Path(self.workspace).resolve())):
+        try:
+            return LocalWorktreeEnvironment(self.workspace).read_text(path)
+        except ValueError:
             return f"Error: path '{path}' is outside workspace"
-        if not full.exists():
+        except FileNotFoundError:
             return f"Error: file not found: {path}"
-        return full.read_text()
 
 
 class FileWriteTool(BaseTool):
@@ -28,11 +29,10 @@ class FileWriteTool(BaseTool):
     workspace: str = ""
 
     def _run(self, path: str, content: str) -> str:
-        full = (Path(self.workspace) / path).resolve()
-        if not str(full).startswith(str(Path(self.workspace).resolve())):
+        try:
+            LocalWorktreeEnvironment(self.workspace).write_text(path, content)
+        except ValueError:
             return f"Error: path '{path}' is outside workspace"
-        full.parent.mkdir(parents=True, exist_ok=True)
-        full.write_text(content)
         return f"Written: {path}"
 
 
@@ -43,12 +43,12 @@ class FileListTool(BaseTool):
     workspace: str = ""
 
     def _run(self, path: str = ".") -> str:
-        full = (Path(self.workspace) / path).resolve()
-        if not str(full).startswith(str(Path(self.workspace).resolve())):
+        try:
+            items = LocalWorktreeEnvironment(self.workspace).list_entries(path)
+        except ValueError:
             return f"Error: path '{path}' is outside workspace"
-        if not full.exists():
+        except FileNotFoundError:
             return f"Error: directory not found: {path}"
-        items = sorted(full.iterdir(), key=lambda p: (not p.is_dir(), p.name))
         lines = []
         for p in items:
             suffix = "/" if p.is_dir() else ""

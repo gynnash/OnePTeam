@@ -10,8 +10,38 @@ from onep.tools.edit import EditTool
 from onep.tools.memory import MemoryTool
 
 
+_PROFILES = {
+    "greenfield": {
+        "goal": "Implement the approved architecture as a complete runnable project.",
+        "backstory": (
+            "You build new applications from approved product and architecture documents. "
+            "Create only the components required by those documents and verify the result."
+        ),
+    },
+    "brownfield": {
+        "goal": "Implement the approved optimization as a minimal, verified patch.",
+        "backstory": (
+            "You work in an existing repository. Reuse its conventions and abstractions, "
+            "avoid unrelated dependencies and refactors, and keep changes within Plan scope."
+        ),
+    },
+    "repair": {
+        "goal": "Repair the current patch using the supplied gate evidence.",
+        "backstory": (
+            "Preserve changes that already satisfy the Plan. Diagnose the structured failure, "
+            "make the smallest corrective edit, and stop when the required gates pass."
+        ),
+    },
+}
+
+
 @register("developer")
-def create_developer(workspace: str = "", source_id: str = "") -> Agent:
+def create_developer(
+    workspace: str = "", source_id: str = "", mode: str = "greenfield"
+) -> Agent:
+    if mode not in _PROFILES:
+        raise ValueError(f"Unknown developer mode: {mode}")
+    profile = _PROFILES[mode]
     tools = [MemoryTool(default_source_id=source_id)]
     if workspace:
         tools = [
@@ -27,16 +57,8 @@ def create_developer(workspace: str = "", source_id: str = "") -> Agent:
 
     return Agent(
         role="研发工程师",
-        goal="按照架构设计实现完整可运行的代码，包括后端 API、前端页面和 Docker 配置",
-        backstory=(
-            "你是一位全栈研发工程师，熟练掌握 Python (FastAPI/SQLAlchemy)、"
-            "TypeScript (React/Vite) 和 React Native。你编写清晰、可维护的代码，"
-            "遵循最佳实践：类型标注、错误处理、RESTful 设计、组件化开发。"
-            "代码标识符和注释使用英文。你同时编写 Dockerfile 和 docker-compose.yml "
-            "以确保应用可容器化运行。"
-            "你可以使用 file_read 读取架构文档，用 file_write 创建代码文件，"
-            "用 file_list 浏览项目结构，用 shell 运行命令验证代码，用 lint 检查代码质量。"
-        ),
+        goal=profile["goal"],
+        backstory=profile["backstory"],
         tools=tools,
         verbose=True,
         allow_delegation=False,

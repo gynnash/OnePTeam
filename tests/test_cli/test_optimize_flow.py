@@ -30,6 +30,24 @@ def test_optimize_records_successful_plan_in_final_report(tmp_path, monkeypatch)
     assert "[integrated] Cache" in services.recorder.instances[0].report
 
 
+def test_optimize_records_typed_flow_order(tmp_path, monkeypatch):
+    services = install_fake_optimize_services(monkeypatch, tmp_path)
+    result = CliRunner().invoke(
+        optimize_cmd,
+        [str(services.source), "--max-rounds", "1", "--name", "demo"],
+    )
+    assert result.exit_code == 0, result.output
+    stages = [
+        payload["stage"]
+        for kind, payload in services.recorder.instances[0].events
+        if kind == "flow_transition"
+    ]
+    assert stages == [
+        "discover", "plan", "schedule", "develop", "integrate", "verify",
+        "finished",
+    ]
+
+
 def test_budget_mode_rejects_models_without_pricing(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

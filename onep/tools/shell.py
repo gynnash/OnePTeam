@@ -1,11 +1,10 @@
 """Shell command execution compatible with CrewAI agents."""
 from __future__ import annotations
 
-import os
 import re
-import subprocess
 
 from crewai.tools import BaseTool
+from onep.runtime.environment import LocalWorktreeEnvironment
 
 # Patterns that match potentially destructive commands
 _DENY_PATTERNS: list[tuple[re.Pattern, str]] = [
@@ -53,24 +52,15 @@ class ShellTool(BaseTool):
                 "This operation is not allowed for safety reasons."
             )
 
-        try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=self.workspace,
-                env={**os.environ},
-            )
-            out = result.stdout
-            if result.stderr:
-                out += "\n[stderr]\n" + result.stderr
-            if result.returncode != 0:
-                out += f"\n[exit: {result.returncode}]"
-            return out or "(no output)"
-        except subprocess.TimeoutExpired:
+        result = LocalWorktreeEnvironment(self.workspace).run(command, timeout)
+        out = result.stdout
+        if result.stderr:
+            out += "\n[stderr]\n" + result.stderr
+        if result.timed_out:
             return f"Command timed out after {timeout}s: {command}"
+        if result.exit_code != 0:
+            out += f"\n[exit: {result.exit_code}]"
+        return out or "(no output)"
 
 
 def _check_command(command: str) -> str | None:

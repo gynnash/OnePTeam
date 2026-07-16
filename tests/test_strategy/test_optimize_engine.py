@@ -5,6 +5,9 @@ from onep.strategy.models import StrategyItem
 
 class FakeLLM:
     def invoke_with_tools_stream(self, **kwargs):
+        sink = kwargs.get("trajectory_sink")
+        if sink:
+            sink({"sequence": 1, "type": "loop_completed", "payload": {}})
         yield {"type": "token", "content": "implemented"}
         yield {"type": "done"}
 
@@ -52,3 +55,12 @@ def test_attempt_returns_output_without_claiming_test_success(monkeypatch):
     )
     assert result.output == "implementation complete"
     assert not hasattr(result, "success")
+
+
+def test_attempt_captures_trajectory_events():
+    item = StrategyItem(title="test", file_location="f.py:1")
+    result = OptimizeEngine().execute_attempt(
+        item, "/tmp/src", "/tmp/ws", FakeLLM()
+    )
+    assert result.events[0]["type"] == "loop_completed"
+    assert result.termination_reason == "completed"

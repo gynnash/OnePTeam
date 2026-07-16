@@ -1,7 +1,16 @@
 import pytest
 from crewai import Agent
+import onep.agents.registry as registry_module
 
 from onep.agents.registry import register, get_agent, list_agents, clear_registry
+
+
+@pytest.fixture(autouse=True)
+def preserve_registry():
+    snapshot = dict(registry_module._registry)
+    yield
+    registry_module._registry.clear()
+    registry_module._registry.update(snapshot)
 
 
 def test_register_and_get_agent():
@@ -41,3 +50,12 @@ def test_list_agents():
     agents = list_agents()
     assert "a" in agents
     assert "b" in agents
+
+
+def test_developer_profiles_are_mode_specific():
+    from onep.agents.developer import create_developer
+
+    brownfield = create_developer(mode="brownfield")
+    repair = create_developer(mode="repair")
+    assert "minimal" in brownfield.goal
+    assert "Repair" in repair.goal

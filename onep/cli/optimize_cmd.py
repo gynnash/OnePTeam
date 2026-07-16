@@ -32,7 +32,10 @@ from onep.strategy.planner import generate_optimize_plan
 from onep.memory.context import (
     MemoryContextBuilder, MemoryContextRequest, append_memory_context,
 )
-from onep.strategy.project_context import load_project_context
+from onep.strategy.project_context import build_project_context
+from onep.strategy.repo_map import RepoMapIndex
+from onep.strategy.optimize_flow import OptimizeFlow, OptimizeFlowStage
+from onep.strategy.gates import discover_required_test_commands
 from onep.strategy.reviewer import ReviewAgent
 from onep.strategy.scanner import (
     aggregate_chunk_results, aggregate_file_results, batch_files,
@@ -73,6 +76,12 @@ def optimize_cmd(
     name = name or re.sub(r"[^\w]", "", source_path.name)[:20]
     name = name or f"optimize-{uuid.uuid4().hex[:6]}"
     config = load_config()
+    commands = test_commands or discover_required_test_commands(source_path)
+    if not commands:
+        raise click.ClickException(
+            "Unable to discover a project test command; pass --test-command."
+        )
+    integration_commands = integration_commands or commands
     if max_cost > 0:
         missing_pricing = []
         for stage in (
@@ -118,20 +127,46 @@ def optimize_cmd(
         "source": source_path, "max_rounds": max_rounds,
         "max_cost": max_cost,
     })
+    flow = OptimizeFlow(recorder.record_event)
     tracker = CostTracker(max_cost)
     scheduler = PlanScheduler()
     fingerprint_registry: dict[str, PlanStatus] = {}
     auto_levels = {value.strip() for value in auto_approve.split(",") if value.strip()}
-    commands = test_commands or ("pytest -q",)
-    integration_commands = integration_commands or ("pytest -q",)
-    context = load_project_context(workspace, str(source_path))
 
     try:
+        repo_map = RepoMapIndex(workspace)
+        repo_map.refresh(git_session.integration_worktree)
+        context = build_project_context(str(source_path), workspace)
+        context = context + "\n\n" + repo_map.render()
         for round_number in range(1, max_rounds + 1):
+            flow.start_round(round_number)
             console.print(f"\n[bold]=== Round {round_number}/{max_rounds} ===[/bold]")
             llm = LLMAdapter()
             analysis_source = git_session.integration_worktree
-            items = _analyze(analysis_source, llm, tracker, name)
+            refresh = repo_map.refresh(analysis_source)
+            if round_number == 1:
+                analysis_files = None
+            else:
+                changed_or_deleted = tuple(
+                    dict.fromkeys((*refresh.changed, *refresh.deleted))
+                )
+                affected = repo_map.affected_paths(changed_or_deleted)
+                if not affected:
+                    flow.converge("no_repository_changes")
+                    recorder.record_event("converged", {
+                        "round": round_number,
+                        "reason": "no_repository_changes",
+                    })
+                    break
+                analysis_files = repo_map.paths(analysis_source, affected)
+                context = build_project_context(str(analysis_source), workspace)
+                context = context + "\n\n" + repo_map.render(affected)
+            items = _analyze(
+                analysis_source, llm, tracker, name, analysis_files
+            )
+            flow.transition(
+                OptimizeFlowStage.PLAN, {"items": len(items)}
+            )
             candidates: list[tuple[PlanCandidate, str]] = []
             for index, item in enumerate(items, 1):
                 item.impact = classify_impact(
@@ -187,22 +222,29 @@ def optimize_cmd(
 
             _resolve_dependencies([candidate for candidate, _ in candidates])
             discovered = [candidate for candidate, _ in candidates]
-            for candidate in discovered:
-                candidate.fingerprint = (
-                    candidate.fingerprint or scheduler.fingerprint(candidate)
-                )
-                if fingerprint_registry.get(candidate.fingerprint) == PlanStatus.INTEGRATED:
-                    recorder.record_event("regression_detected", {
-                        "item_id": candidate.id,
-                        "fingerprint": candidate.fingerprint,
-                    })
-            fresh = scheduler.new_candidates(
-                discovered, set(fingerprint_registry)
+            texts = {candidate.id: text for candidate, text in candidates}
+            fresh, regressions = flow.classify_discoveries(
+                discovered, fingerprint_registry, scheduler
             )
+            for candidate in regressions:
+                recorder.record_event("regression_detected", {
+                    "item_id": candidate.id,
+                    "fingerprint": candidate.fingerprint,
+                })
+                regression = PlanRecord(candidate)
+                regression.fail(
+                    FailureReason.REGRESSION_DETECTED,
+                    "An integrated optimization was rediscovered after verification.",
+                )
+                recorder.save_plan(regression, texts.get(candidate.id, ""))
+                fingerprint_registry[candidate.fingerprint] = regression.status
             if not fresh:
+                flow.converge("no_new_candidates")
                 recorder.record_event("converged", {"round": round_number})
                 break
-            texts = {candidate.id: text for candidate, text in candidates}
+            flow.transition(
+                OptimizeFlowStage.SCHEDULE, {"plans": len(fresh)}
+            )
             terminal_by_id = {
                 plan.candidate.id: plan.status for plan in recorder.run.plans
             }
@@ -234,6 +276,9 @@ def optimize_cmd(
                     failed = PlanRecord(candidate)
                     failed.fail(FailureReason.INVALID_PLAN_METADATA, str(exc))
                     recorder.save_plan(failed, texts.get(candidate.id, ""))
+                flow.transition(OptimizeFlowStage.VERIFY, {
+                    "reason": "invalid_plan_metadata",
+                })
                 break
             for group_index, group in enumerate(groups, 1):
                 current_status = {
@@ -262,6 +307,10 @@ def optimize_cmd(
                 group = runnable_group
                 if not group:
                     continue
+                flow.transition(OptimizeFlowStage.DEVELOP, {
+                    "group": group_index,
+                    "plans": [candidate.id for candidate in group],
+                })
                 recorder.record_event("group_started", {
                     "round": round_number,
                     "group": group_index,
@@ -331,6 +380,9 @@ def optimize_cmd(
                             failed.fail(FailureReason.DEVELOPER_FAILED, str(exc))
                             results.append(failed)
                 by_id = {result.candidate.id: result for result in results}
+                flow.transition(OptimizeFlowStage.INTEGRATE, {
+                    "group": group_index,
+                })
                 integration_coordinator = OptimizeCoordinator(
                     OptimizeEngine(),
                     PlanTestRunner(config.pipeline.test_timeout),
@@ -353,12 +405,20 @@ def optimize_cmd(
                     recorder.save_plan(result, texts[candidate.id])
                     fingerprint_registry[candidate.fingerprint] = result.status
                 _flush_cost(recorder, tracker)
+            if flow.stage in {
+                OptimizeFlowStage.SCHEDULE,
+                OptimizeFlowStage.DEVELOP,
+                OptimizeFlowStage.INTEGRATE,
+            }:
+                flow.transition(OptimizeFlowStage.VERIFY)
             if not any(
                 plan.status == PlanStatus.INTEGRATED
                 for plan in run.plans
             ):
                 break
 
+        if flow.stage in {OptimizeFlowStage.VERIFY, OptimizeFlowStage.CONVERGED}:
+            flow.finish()
         run = recorder.run
         run.total_cost = tracker.spent
         run.spent = tracker.spent
@@ -392,6 +452,7 @@ def optimize_cmd(
         console.print(report)
         console.print(f"[dim]Run records: {run_dir}[/dim]")
     except (KeyboardInterrupt, click.Abort) as exc:
+        flow.cancel()
         run = recorder.run
         run.status = RunStatus.CANCELLED
         run.failure_reason = FailureReason.CANCELLED
@@ -401,6 +462,7 @@ def optimize_cmd(
         recorder.record_event("run_cancelled", {})
         raise click.ClickException("Optimize cancelled") from exc
     except Exception as exc:
+        flow.fail(str(exc))
         run = recorder.run
         run.status = RunStatus.FAILED
         run.failure_reason = FailureReason.INTERNAL_ERROR
@@ -447,9 +509,9 @@ def _candidate(item: StrategyItem, commands: tuple[str, ...], generated=None) ->
         impact=item.impact,
         files={Path(path) for path in expected},
         dependencies=set(generated.dependencies if generated else item.dependencies),
-        test_commands=(
-            generated.test_commands if generated and generated.test_commands
-            else commands
+        test_commands=commands,
+        focused_test_commands=(
+            generated.test_commands if generated else ()
         ),
         risk_flags=set(generated.risk_flags if generated else ()),
     )
@@ -460,11 +522,12 @@ def _analyze(
     llm: LLMAdapter,
     tracker: CostTracker | None = None,
     project_name: str = "",
+    source_files: list[Path] | None = None,
 ) -> list[StrategyItem]:
     from onep.orchestrator.brownfield import ANALYZE_PROMPT, SCAN_PROMPT_FULL
 
     scan_results = []
-    for files in batch_files(walk_files(source)):
+    for files in batch_files(source_files or walk_files(source)):
         content_batches = build_content_batches(source, files)
         entries = [
             entry for batch in content_batches for entry in batch.entries
