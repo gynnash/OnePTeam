@@ -109,6 +109,10 @@ class OptimizeEngine:
         feedback: str = "",
         memory_context: str = "",
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        verbose: bool = True,
+        max_tool_rounds: int = 15,
+        mutation_nudge_round: int = 0,
+        block_full_test_commands: bool = False,
     ) -> "EngineAttemptResult":
         if llm_adapter is None:
             raise RuntimeError("LLM not available")
@@ -147,6 +151,10 @@ class OptimizeEngine:
             model_stage="optimize_developer",
             event_sink=capture,
             agent_mode="repair" if feedback else "brownfield",
+            verbose=verbose,
+            max_tool_rounds=max_tool_rounds,
+            mutation_nudge_round=mutation_nudge_round,
+            block_full_test_commands=block_full_test_commands,
         )
         termination_reason = "completed"
         if events and events[-1]["type"] == "loop_limit_reached":
@@ -166,7 +174,10 @@ class OptimizeEngine:
 
 def _invoke_stream(llm_adapter, agent_name: str, prompt: str,
                    source_path: str, model_stage: str | None = None,
-                   event_sink=None, agent_mode: str = "brownfield") -> str:
+                   event_sink=None, agent_mode: str = "brownfield",
+                   verbose: bool = True, max_tool_rounds: int = 15,
+                   mutation_nudge_round: int = 0,
+                   block_full_test_commands: bool = False) -> str:
     """Invoke agent with tools and streaming output."""
     from onep.agents.registry import get_agent
     from onep.llm.router import resolve_model
@@ -189,9 +200,11 @@ def _invoke_stream(llm_adapter, agent_name: str, prompt: str,
     stage_name = model_stage or agent_name
     model_name, _ = resolve_model(stage_name)
 
-    console.print(f"  [dim]Agent: {agent.role} | Model: {model_name}[/dim]")
+    if verbose:
+        console.print(f"  [dim]Agent: {agent.role} | Model: {model_name}[/dim]")
     tool_names = [t.name for t in tools]
-    console.print(f"  [dim]Tools: {', '.join(tool_names)}[/dim]")
+    if verbose:
+        console.print(f"  [dim]Tools: {', '.join(tool_names)}[/dim]")
 
     parts = []
     for event in llm_adapter.invoke_with_tools_stream(
@@ -199,22 +212,27 @@ def _invoke_stream(llm_adapter, agent_name: str, prompt: str,
         user_prompt=prompt,
         tools=tools,
         stage_name=stage_name,
-        max_tool_rounds=15,
+        max_tool_rounds=max_tool_rounds,
         trajectory_sink=event_sink,
+        mutation_nudge_round=mutation_nudge_round,
+        block_full_test_commands=block_full_test_commands,
     ):
         if event["type"] == "tool_call":
             args_str = ", ".join(
                 f"{k}={_brief_val(v)}"
                 for k, v in event.get("tool_args", {}).items()
             )
-            console.print(f"  [dim]{event['tool_name']}({args_str})[/dim]")
+            if verbose:
+                console.print(f"  [dim]{event['tool_name']}({args_str})[/dim]")
         elif event["type"] == "token":
-            console.print(event["content"], end="")
+            if verbose:
+                console.print(event["content"], end="")
             parts.append(event["content"])
         elif event["type"] == "done":
             pass
 
-    console.print()
+    if verbose:
+        console.print()
     from onep.llm.adapters import display_usage
     display_usage()
     return "".join(parts)

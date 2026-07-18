@@ -12,7 +12,7 @@ from onep.persistence.database import (
     init_db, update_project, insert_stage_run, update_stage_run, list_projects,
 )
 from onep.persistence.models import (
-    Project, PipelineState, StageRun, StageStatus, ProjectStatus,
+    Project, PipelineState, StageRun, ProjectStatus,
 )
 from onep.persistence.state import load_state, save_state
 from onep.memory import hooks as memory_hooks
@@ -27,8 +27,34 @@ from onep.orchestrator.greenfield import GREENFIELD_STAGES, STAGE_PROMPTS
 console = Console()
 
 
-def run_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
-    """Execute the Greenfield pipeline. Returns True on success."""
+def run_pipeline(
+    project_name: str,
+    start_from: Optional[str] = None,
+    options=None,
+) -> bool:
+    """Execute or resume the autonomous Greenfield engineering loop."""
+    init_db()
+    projects = list_projects()
+    project = next((p for p in projects if p.name == project_name), None)
+    if project is None:
+        console.print(f"[red]Project '{project_name}' not found.[/red]")
+        return False
+    if start_from:
+        console.print(
+            f"[yellow]--stage {start_from} is a legacy hint; resuming from the durable checkpoint.[/yellow]"
+        )
+    if options is None:
+        from onep.greenfield.models import GreenfieldOptions
+        state = load_state(Path(project.workspace_path))
+        options = GreenfieldOptions.from_dict(
+            state.artifacts.get("greenfield_options")
+        )
+    from onep.greenfield.engine import GreenfieldEngine
+    return GreenfieldEngine(console).run(project, options)
+
+
+def run_legacy_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:
+    """Legacy six-stage pipeline retained for old checkpoints."""
     config = load_config()
     init_db()
 

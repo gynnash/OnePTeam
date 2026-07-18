@@ -14,6 +14,10 @@ _SUGGESTIONS = {
     "test_failed": "Trace the first failing test to the changed code and fix its cause.",
     "review_failed": "Address every blocking review issue without broadening the patch.",
     "developer_stuck": "Change approach: inspect a different source of evidence before editing.",
+    "implementation_incomplete": (
+        "Continue implementing from the current files. Do not run external acceptance "
+        "commands until all planned production and pytest files exist."
+    ),
 }
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import shlex
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from uuid import uuid4
@@ -96,6 +97,8 @@ class LLMAdapter:
         max_tool_rounds: int = 8,
         trajectory_sink: TrajectorySink | None = None,
         stuck_detector: StuckDetector | None = None,
+        mutation_nudge_round: int = 0,
+        block_full_test_commands: bool = False,
     ) -> Iterator[dict[str, Any]]:
         """Stream LLM response with tool calling support.
 
@@ -123,6 +126,8 @@ class LLMAdapter:
         ]
 
         rounds = 0
+        mutated = False
+        mutation_nudged = False
         while rounds < max_tool_rounds:
             rounds += 1
             trajectory.emit("model_round_started", round=rounds)
@@ -182,6 +187,9 @@ class LLMAdapter:
                 text_content = "".join(content_parts).strip()
                 if text_content:
                     assistant_msg["content"] = text_content
+                    trajectory.emit(
+                        "model_message", round=rounds, content=text_content
+                    )
                 tc_list = []
                 tool_results: list[dict] = []  # collect, append after assistant
                 for idx in sorted(tool_calls_acc.keys()):
@@ -222,10 +230,32 @@ class LLMAdapter:
                             "tool_name": tc_data["name"],
                             "tool_args": args,
                         }
-                        try:
-                            result = tool.run(**args)
-                        except Exception as e:
-                            result = f"Error: {e}"
+                        if (
+                            block_full_test_commands
+                            and tc_data["name"] == "shell"
+                            and _is_broad_pytest_command(
+                                str(args.get("command") or "")
+                            )
+                        ):
+                            result = (
+                                "Blocked: full-suite pytest is owned by the external "
+                                "quality gate. Implement the current slice and run only "
+                                "its focused tests."
+                            )
+                            trajectory.emit(
+                                "full_test_blocked", round=rounds,
+                                command=str(args.get("command") or ""),
+                            )
+                        else:
+                            try:
+                                result = tool.run(**args)
+                            except Exception as e:
+                                result = f"Error: {e}"
+                        if (
+                            tc_data["name"] in {"file_write", "edit"}
+                            and not str(result).startswith("Error:")
+                        ):
+                            mutated = True
                         if len(result) > 4000:
                             result = result[:4000] + "\n... (truncated)"
                         trajectory.emit(
@@ -267,8 +297,30 @@ class LLMAdapter:
                     assistant_msg["tool_calls"] = tc_list
                 messages.append(assistant_msg)
                 messages.extend(tool_results)
+                if (
+                    mutation_nudge_round > 0
+                    and rounds >= mutation_nudge_round
+                    and not mutated
+                    and not mutation_nudged
+                ):
+                    mutation_nudged = True
+                    trajectory.emit("implementation_nudge", round=rounds)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Implementation checkpoint: no file has been changed yet. "
+                            "Stop broad repository analysis now. In the next response, "
+                            "batch-create or edit all production and test files required "
+                            "by the current slice. Do not run the full test suite."
+                        ),
+                    })
             else:
                 # no tool calls — model is done
+                text_content = "".join(content_parts).strip()
+                if text_content:
+                    trajectory.emit(
+                        "model_message", round=rounds, content=text_content
+                    )
                 trajectory.emit("loop_completed", rounds=rounds)
                 yield {
                     "type": "done",
@@ -319,6 +371,37 @@ class LLMAdapter:
 
     def reset_usage(self) -> None:
         self.usage = TokenUsage()
+
+
+def _is_broad_pytest_command(command: str) -> bool:
+    """Detect pytest invocations that target the whole repository or test tree."""
+    normalized = command.replace("&&", "|").replace(";", "|")
+    for segment in normalized.split("|"):
+        try:
+            parts = shlex.split(segment.strip())
+        except ValueError:
+            continue
+        if "pytest" not in parts:
+            continue
+        index = parts.index("pytest")
+        targets = [
+            value for value in parts[index + 1:]
+            if not value.startswith("-")
+            and not _is_shell_redirection(value)
+        ]
+        if not targets or all(
+            value.rstrip("/") in {".", "test", "tests"}
+            for value in targets
+        ):
+            return True
+    return False
+
+
+def _is_shell_redirection(value: str) -> bool:
+    compact = value.replace(" ", "")
+    if compact in {">", ">>", "/dev/null"}:
+        return True
+    return any(marker in compact for marker in (">&", "2>", "1>", "<"))
 
 
 def _tools_to_openai_schema(tools: list) -> list[dict]:

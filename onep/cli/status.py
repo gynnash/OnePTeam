@@ -8,6 +8,7 @@ from rich.panel import Panel
 import shutil
 from pathlib import Path
 
+from onep.config import load_config
 from onep.persistence.database import (
     init_db, list_projects, update_project, delete_project,
     get_latest_stage_run, insert_approval,
@@ -59,7 +60,7 @@ def pause_cmd(project_name: str):
 @click.command()
 @click.argument("project_name", type=str)
 def resume_cmd(project_name: str):
-    """Resume a paused pipeline."""
+    """Resume a paused pipeline and continue execution."""
     init_db()
     projects = list_projects()
     project = next((p for p in projects if p.name == project_name), None)
@@ -71,6 +72,8 @@ def resume_cmd(project_name: str):
     project.touch()
     update_project(project)
     console.print(f"[green]Project '{project_name}' resumed.[/green]")
+    from onep.orchestrator.runner import run_pipeline
+    run_pipeline(project_name)
 
 
 @click.command()
@@ -103,7 +106,9 @@ def approve_cmd(project_name: str):
     project.status = ProjectStatus.RUNNING
     project.touch()
     update_project(project)
-    console.print(f"[green]Stage approved for '{project_name}'. Run 'onep run {project_name}' to continue.[/green]")
+    console.print(f"[green]Stage approved for '{project_name}'. Continuing...[/green]")
+    from onep.orchestrator.runner import run_pipeline
+    run_pipeline(project_name)
 
 
 @click.command()
@@ -194,8 +199,20 @@ def delete_cmd(project_ref: str, force: bool, keep_files: bool):
     for project in targets:
         if not keep_files:
             ws = Path(project.workspace_path)
-            if ws.exists():
+            managed_root = (
+                Path(load_config().project.root_dir).expanduser().resolve()
+                / "projects"
+            )
+            try:
+                is_managed_workspace = ws.resolve().is_relative_to(managed_root)
+            except OSError:
+                is_managed_workspace = False
+            if ws.exists() and is_managed_workspace:
                 shutil.rmtree(ws)
+            elif ws.exists():
+                console.print(
+                    f"[yellow]Kept external workspace: {ws}[/yellow]"
+                )
         delete_project(project.id)
 
     console.print(f"[green]{len(targets)} project(s) deleted.[/green]")

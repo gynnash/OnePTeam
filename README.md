@@ -65,12 +65,23 @@ pipeline:
 ### Greenfield — 新建项目
 
 ```bash
-onep create "做一个支持登录的记事本应用"
+# 在当前 Git 仓库中初始化并立即运行自动工程循环
+onep create "做一个支持登录的记事本应用" --name myapp
+
+# 仅初始化，稍后再运行
+onep create "做一个支持登录的记事本应用" --name myapp --no-run
 onep run myapp
+
 onep status
 onep show prd myapp
-onep pause myapp / onep resume myapp / onep approve myapp
+onep pause myapp / onep resume myapp
 ```
+
+默认 Greenfield 由单一可写 Engineer 持续执行需求分析、验收合同、架构、
+纵向切片开发、测试、只读评审和证据驱动修复。正常阶段无需人工审批；只有
+需求无法安全推断或流程无法继续时才暂停。代码保留在
+`onep/greenfield-<run-id>` 分支，运行记录保存在
+`.onep/greenfield/runs/<run-id>/`。
 
 ### Brownfield — 存量代码分析+优化
 

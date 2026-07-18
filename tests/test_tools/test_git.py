@@ -29,6 +29,15 @@ def test_git_add_and_commit(tmp_path: Path):
     assert "initial commit" in log
 
 
+def test_git_init(tmp_path: Path):
+    tool = GitTool(workspace=str(tmp_path))
+
+    result = tool.run(operation="init")
+
+    assert "Initialized Git repository" in result
+    assert (tmp_path / ".git").is_dir()
+
+
 def test_git_status(tmp_path: Path):
     _init_repo(tmp_path)
     tool = GitTool(workspace=str(tmp_path))

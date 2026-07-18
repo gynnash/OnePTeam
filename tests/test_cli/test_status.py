@@ -1,4 +1,5 @@
 from click.testing import CliRunner
+from types import SimpleNamespace
 
 from onep.main import cli
 from onep.persistence.database import init_db, insert_project, insert_stage_run
@@ -75,3 +76,32 @@ def test_reject_records_feedback_and_reopens_stage(tmp_path, monkeypatch):
         "SELECT decision, feedback FROM approvals"
     ).fetchone()
     assert row == ("rejected", "Missing acceptance criteria")
+
+
+def test_delete_keeps_external_in_place_workspace(tmp_path, monkeypatch):
+    db_dir = tmp_path / "onep-data"
+    external_workspace = tmp_path / "source-repo"
+    external_workspace.mkdir()
+    marker = external_workspace / "keep.txt"
+    marker.write_text("keep")
+    monkeypatch.setattr(
+        "onep.persistence.database._config_dir", lambda: db_dir
+    )
+    monkeypatch.setattr(
+        "onep.cli.status.load_config",
+        lambda: SimpleNamespace(
+            project=SimpleNamespace(root_dir=str(db_dir))
+        ),
+    )
+    init_db()
+    insert_project(Project(
+        name="external",
+        mode=ProjectMode.GREENFIELD,
+        workspace_path=str(external_workspace),
+    ))
+
+    result = CliRunner().invoke(cli, ["delete", "external", "--force"])
+
+    assert result.exit_code == 0
+    assert "Kept external workspace" in result.output
+    assert marker.read_text() == "keep"
