@@ -94,3 +94,98 @@ def test_continue_when_backlog_and_budget_available():
         id="I-1", title="T", description="d")])
     assert decision.stop is False
     assert decision.reason is None
+
+
+class ReflectorLLM:
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = []
+
+    def invoke(self, system_prompt, user_prompt, stage_name):
+        self.calls.append(stage_name)
+        return self.payload
+
+
+REFLECTOR_PAYLOAD = ('{"goal_coverage": 0.9, "architecture_quality": 0.8, '
+                     '"blocker_count": 1, "risks": ["slow startup"], '
+                     '"quality_score": 0.85}')
+
+
+def test_reflect_with_llm_anchors_quality_score():
+    run = GreenfieldRun(id="gf-1", project_name="demo",
+                        requirement="r", workspace="/tmp")
+    llm = ReflectorLLM(REFLECTOR_PAYLOAD)
+    snapshot = ReflectStage().run(
+        run, _contract(2, 2), True, 1, llm=llm,
+    )
+    deterministic = 1.0  # 0.7 * 1.0 acceptance + 0.3 * 1.0 tests
+    assert snapshot.quality_score == round(0.7 * deterministic + 0.3 * 0.85, 4)
+    assert snapshot.goal_coverage == 0.9
+    assert snapshot.architecture_quality == 0.8
+    assert snapshot.blocker_count == 1
+    assert snapshot.risks == ["slow startup"]
+    assert llm.calls == ["harness_reflector"]
+
+
+def test_reflect_with_llm_garbage_falls_back_to_deterministic():
+    run = GreenfieldRun(id="gf-1", project_name="demo",
+                        requirement="r", workspace="/tmp")
+    llm = ReflectorLLM("not json")
+    snapshot = ReflectStage().run(run, _contract(2, 2), True, 1, llm=llm)
+    assert snapshot.quality_score == 1.0
+    assert snapshot.architecture_quality == 0.0
+    assert snapshot.blocker_count == 0
+    assert snapshot.risks == []
+
+
+def test_stop_no_high_value_work_with_scored_candidates():
+    run = _harness_run()
+    scored = [
+        ImprovementCandidate(id="I-1", title="T1", score=0.6),
+        ImprovementCandidate(id="I-2", title="T2", score=0.3),
+    ]
+    decision = evaluate_stop(run, _snapshot(), [], scored=scored)
+    assert decision.stop is True
+    assert decision.reason is StopReason.NO_HIGH_VALUE_WORK
+    assert decision.evidence["top_score"] == 0.6
+    assert decision.evidence["scored_count"] == 2
+
+
+def test_stop_diminishing_returns_after_two_flat_rounds():
+    run = _harness_run(iteration=3)
+    run.quality_history = [
+        _snapshot(score=0.90),
+        _snapshot(score=0.91),
+        _snapshot(score=0.91),
+    ]
+    decision = evaluate_stop(
+        run, _snapshot(score=0.91),
+        [ImprovementCandidate(id="I-1", title="T", score=0.9)],
+    )
+    assert decision.stop is True
+    assert decision.reason is StopReason.DIMINISHING_RETURNS
+    assert "deltas" in decision.evidence
+
+
+def test_continue_when_deltas_are_large():
+    run = _harness_run(iteration=3)
+    run.quality_history = [
+        _snapshot(score=0.70),
+        _snapshot(score=0.85),
+        _snapshot(score=0.90),
+    ]
+    decision = evaluate_stop(
+        run, _snapshot(score=0.90),
+        [ImprovementCandidate(id="I-1", title="T", score=0.9)],
+    )
+    assert decision.stop is False
+
+
+def test_no_diminishing_returns_with_short_history():
+    run = _harness_run(iteration=2)
+    run.quality_history = [_snapshot(score=0.90), _snapshot(score=0.91)]
+    decision = evaluate_stop(
+        run, _snapshot(score=0.91),
+        [ImprovementCandidate(id="I-1", title="T", score=0.9)],
+    )
+    assert decision.stop is False
