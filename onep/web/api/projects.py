@@ -25,6 +25,7 @@ def _project_by_name(name: str):
 
 @router.get("/projects")
 def projects_list():
+    init_db()
     return {"projects": harness_state.project_summaries()}
 
 

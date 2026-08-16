@@ -80,3 +80,36 @@ def test_stop_endpoint_writes_flag(tmp_path, monkeypatch):
     response = client.post("/api/projects/demo/stop")
     assert response.status_code == 200
     assert (workspace / ".onep" / "harness" / "stop_requested").exists()
+
+
+def test_projects_list_initializes_db_on_fresh_home(tmp_path, monkeypatch):
+    # Fresh home dir with NO meta.db; the list endpoint must not 500.
+    home = tmp_path / "fresh-home"
+    home.mkdir()
+    monkeypatch.setattr("onep.persistence.database._config_dir", lambda: home)
+    monkeypatch.setattr("onep.web.runtime.web_config", lambda: ("127.0.0.1", 8311))
+    client = TestClient(create_app())
+    response = client.get("/api/projects")
+    assert response.status_code == 200
+    assert response.json()["projects"] == []
+
+
+def test_spawn_run_closes_log_handle(tmp_path, monkeypatch):
+    from onep.web.runtime import spawn_run
+
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, *args, **kwargs):
+            captured["kwargs"] = kwargs
+
+        @property
+        def pid(self):
+            return 1234
+
+    monkeypatch.setattr("onep.web.runtime.subprocess.Popen", FakePopen)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    result = spawn_run("demo", workspace)
+    assert result == {"pid": 1234, "started": True}
+    assert captured["kwargs"]["stdout"].closed is True

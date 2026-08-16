@@ -68,6 +68,8 @@ def spawn_run(name: str, workspace: Path) -> dict[str, Any] | None:
     except OSError:
         log_handle.close()
         return None
+    # Popen dups the fd into the child; the parent copy can be closed now.
+    log_handle.close()
     return {"pid": process.pid, "started": True}
 
 
