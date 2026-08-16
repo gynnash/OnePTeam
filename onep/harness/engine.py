@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import uuid
 
@@ -24,6 +25,7 @@ from onep.harness.cross_project import CrossProjectDistiller
 from onep.harness.design import DesignStage
 from onep.harness.discover import BrainstormStage, PrioritizeStage
 from onep.harness.distiller import KnowledgeDistiller
+from onep.harness.interventions import apply_candidate_decisions
 from onep.harness.knowledge_models import (
     load_run_events, save_distillations,
 )
@@ -235,7 +237,7 @@ class HarnessEngine:
             recorder.save_run()
             save_harness_run(run)
 
-            flow = HarnessFlow()
+            flow = HarnessFlow(event_sink=self._flow_sink(workspace))
             contract: AcceptanceContract | None = None
             if not gf_run.slices:
                 flow.start_iteration(1)
@@ -404,7 +406,6 @@ class HarnessEngine:
                     integrated_fingerprints=self._integrated_fingerprints(run),
                     use_scores=True,
                 )
-                decision = evaluate_stop(run, snapshot, backlog, scored=scored)
                 run.improvement_candidates = [
                     *[c for c in run.improvement_candidates
                        if c.status not in {
@@ -413,6 +414,10 @@ class HarnessEngine:
                     *backlog,
                     *parked,
                 ]
+                backlog, parked = apply_candidate_decisions(
+                    run, workspace, backlog, parked
+                )
+                decision = evaluate_stop(run, snapshot, backlog, scored=scored)
                 save_harness_run(run)
                 if decision.stop:
                     run.stop_state = {
@@ -604,7 +609,7 @@ class HarnessEngine:
         project.status = ProjectStatus.RUNNING
         update_project(project)
         save_harness_run(run)
-        flow = HarnessFlow()
+        flow = HarnessFlow(event_sink=self._flow_sink(workspace))
         # Clear any stop request left behind by a previous run; otherwise a
         # stale flag would wedge every brownfield run at PLAN -> USER_STOP
         # (parity with the greenfield path's clear_stop_request).
@@ -739,6 +744,9 @@ class HarnessEngine:
                     *backlog,
                     *parked,
                 ]
+                backlog, parked = apply_candidate_decisions(
+                    run, workspace, backlog, parked
+                )
                 decision = evaluate_stop(run, snapshot, backlog,
                                          scored=scored)
                 save_harness_run(run)
@@ -918,3 +926,20 @@ class HarnessEngine:
             for candidate in run.improvement_candidates
             if candidate.status == "integrated" and candidate.fingerprint
         }
+
+    @staticmethod
+    def _flow_sink(workspace: Path):
+        """Best-effort append-only sink for flow transitions (web console)."""
+        path = Path(workspace) / ".onep" / "harness" / "flow-events.jsonl"
+
+        def sink(event_type: str, payload: dict) -> None:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(
+                        {"type": event_type, "payload": payload},
+                        ensure_ascii=False) + "\n")
+            except OSError:
+                pass  # observability is best-effort; never break the loop
+
+        return sink

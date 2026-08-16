@@ -1,4 +1,5 @@
 # tests/test_harness/test_engine.py
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,9 @@ from onep.greenfield.models import (
 )
 from onep.greenfield.recorder import GreenfieldRecorder
 from onep.harness.engine import HarnessEngine
+from onep.harness.interventions import (
+    load_candidate_decisions, record_candidate_decision,
+)
 from onep.harness.models import HarnessOptions, StopReason
 from onep.harness.persistence import load_harness_run, stop_requested
 from onep.llm.adapters import TokenUsage
@@ -1022,3 +1026,74 @@ def test_harness_cross_distill_failure_does_not_fail_run(tmp_path, monkeypatch):
     ) is True
     run = load_harness_run(tmp_path)
     assert run.status == "completed"
+
+
+def test_harness_writes_flow_events(tmp_path, monkeypatch):
+    """Flow transitions are observable via flow-events.jsonl."""
+    _repo(tmp_path)
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    engine = HarnessEngine(llm=FakeLLM())
+    engine.kernel.optimizer = WritingOptimizer()
+    assert engine.run(
+        _project(tmp_path),
+        GreenfieldOptions(max_rounds=4, max_repairs_per_slice=2,
+                          test_commands=["pytest -q"], deploy_mode="none"),
+    ) is True
+    events_path = tmp_path / ".onep" / "harness" / "flow-events.jsonl"
+    assert events_path.exists()
+    stages = []
+    for line in events_path.read_text(encoding="utf-8").splitlines():
+        payload = (json.loads(line) or {}).get("payload", {})
+        stages.append(payload.get("stage"))
+    assert stages[0] == "understand"
+    assert "build" in stages
+    assert stages[-1] == "stop"
+
+
+class ApprovedCandidateLLM(FakeLLM):
+    """Round 1 proposes I-001; later rounds propose nothing."""
+
+    def __init__(self):
+        super().__init__()
+        self.round = 0
+
+    def invoke(self, system_prompt, user_prompt, stage_name):
+        if stage_name == "harness_brainstorm":
+            self.brainstorm_calls += 1
+            self.round += 1
+            if self.round == 1:
+                return (
+                    '{"candidates": [{"id": "I-001", "title": "Add a CLI", '
+                    '"description": "Expose product value through a CLI", '
+                    '"evidence": "product gap"}]}'
+                )
+            return '{"candidates": []}'
+        if stage_name == "harness_scorer":
+            return (
+                '{"scores": [{"id": "I-001", "V": 0.9, "Q": 0.9, "R": 0.9, '
+                '"E": 0.9, "C": 0.9, "Risk": 0.9, "rationale": "neutral"}]}'
+            )
+        return super().invoke(system_prompt, user_prompt, stage_name)
+
+
+def test_harness_applies_human_approval_to_backlog(tmp_path, monkeypatch):
+    """A pre-seeded approve decision pushes the parked candidate into the
+    backlog, gets it built, and gates the GOALS_SATISFIED stop."""
+    _repo(tmp_path)
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    record_candidate_decision(tmp_path, "I-001", "approve", note="user wants it")
+    engine = HarnessEngine(llm=ApprovedCandidateLLM())
+    engine.kernel.optimizer = WritingOptimizer()
+    assert engine.run(
+        _project(tmp_path),
+        GreenfieldOptions(max_rounds=4, max_repairs_per_slice=2,
+                          test_commands=["pytest -q"], deploy_mode="none"),
+    ) is True
+    run = load_harness_run(tmp_path)
+    assert run.iteration == 2
+    assert run.stop_state["reason"] == "goals_satisfied"
+    approved = next(c for c in run.improvement_candidates if c.id == "I-001")
+    assert approved.status == "integrated"
+    assert load_candidate_decisions(tmp_path)[0]["applied"] is True
