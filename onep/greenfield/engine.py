@@ -138,40 +138,10 @@ class GreenfieldEngine:
                 workspace, run, contract, self._load_architecture(run_dir)
             )
             self._commit_design_docs(session)
-            mandatory = self._slice_gate_commands(workspace, run)
-            gate_runner = GreenfieldGateRunner(load_config().pipeline.test_timeout)
-            detector = AttemptStagnationDetector(3)
-            requirements_satisfied = self._requirements_satisfied(
-                run, contract, session, gate_runner, recorder, tracker
+            requirements_satisfied = self.build_pending_slices(
+                run, contract, session, recorder, tracker
             )
-
-            if not requirements_satisfied:
-                for index in range(run.current_slice, len(run.slices)):
-                    plan = run.slices[index]
-                    if plan.status == "completed":
-                        continue
-                    run.current_slice = index
-                    self._execute_slice(
-                        run, plan, contract, session, mandatory, gate_runner,
-                        recorder, tracker, detector,
-                    )
-                    mandatory = self._slice_gate_commands(workspace, run)
-                    requirements_satisfied = False
-                    if contract.required_complete:
-                        requirements_satisfied = self._requirements_satisfied(
-                            run, contract, session, gate_runner, recorder, tracker
-                        )
-                    if requirements_satisfied:
-                        for remaining in run.slices[index + 1:]:
-                            if remaining.status == "pending":
-                                remaining.status = "skipped_satisfied"
-                                recorder.save_slice(remaining)
-                        recorder.trace(
-                            "SATISFIED",
-                            "完整需求已经通过验收，停止执行剩余切片",
-                            "green",
-                        )
-                        break
+            gate_runner = GreenfieldGateRunner(load_config().pipeline.test_timeout)
 
             mandatory = self._final_gate_commands(workspace, run, contract)
             self._final_verify(
@@ -937,6 +907,58 @@ class GreenfieldEngine:
         return session.repo.index.commit(
             "docs: persist detailed product and implementation plan"
         ).hexsha
+
+    def build_pending_slices(
+        self,
+        run: GreenfieldRun,
+        contract: AcceptanceContract,
+        session: GreenfieldGitSession,
+        recorder: GreenfieldRecorder,
+        tracker: CostTracker,
+        respect_satisfied_early_exit: bool = True,
+    ) -> bool:
+        """Execute pending slices until satisfied or exhausted.
+
+        The harness passes respect_satisfied_early_exit=False for
+        post-acceptance iterations whose new slices expand scope beyond
+        the original contract.
+        """
+        workspace = session.workspace
+        mandatory = self._slice_gate_commands(workspace, run)
+        gate_runner = GreenfieldGateRunner(load_config().pipeline.test_timeout)
+        detector = AttemptStagnationDetector(3)
+        if respect_satisfied_early_exit and self._requirements_satisfied(
+            run, contract, session, gate_runner, recorder, tracker
+        ):
+            return True
+        for index in range(run.current_slice, len(run.slices)):
+            plan = run.slices[index]
+            if plan.status == "completed":
+                continue
+            run.current_slice = index
+            self._execute_slice(
+                run, plan, contract, session, mandatory, gate_runner,
+                recorder, tracker, detector,
+            )
+            mandatory = self._slice_gate_commands(workspace, run)
+            if (
+                respect_satisfied_early_exit
+                and contract.required_complete
+                and self._requirements_satisfied(
+                    run, contract, session, gate_runner, recorder, tracker
+                )
+            ):
+                for remaining in run.slices[index + 1 :]:
+                    if remaining.status == "pending":
+                        remaining.status = "skipped_satisfied"
+                        recorder.save_slice(remaining)
+                recorder.trace(
+                    "SATISFIED", "完整需求已经通过验收，停止执行剩余切片", "green"
+                )
+                return True
+        return self._requirements_satisfied(
+            run, contract, session, gate_runner, recorder, tracker
+        )
 
     @staticmethod
     def _slice_prompt(
