@@ -24,13 +24,23 @@ Original goal: {goal}
 Delivered acceptance items:
 {acceptance}
 
+Code quality signals (tests, review findings, lint):
+{code_signals}
+
+Prior improvement candidates (do not repeat these):
+{prior}
+
 Quality snapshot (iteration {iteration}):
 {snapshot}
 
 Return JSON only with this shape:
 {{"candidates": [{{"id": "I-001", "title": "short title",
-"description": "concrete change"}}]}}
-Propose at most 5 candidates. Prefer small, evidence-based improvements
+"description": "concrete change",
+"evidence": "which acceptance item, test result, review finding, or code
+signal motivates this proposal"}}]}}
+Propose at most 5 candidates. Every proposal MUST cite observable evidence
+from the delivered product or its quality signals; speculative proposals
+without evidence are rejected. Prefer small, evidence-based improvements
 over speculative features."""
 
 
@@ -64,10 +74,14 @@ class BrainstormStage:
         iteration: int,
         snapshot,
         tracker=None,
+        code_signals: str = "",
+        prior_titles: tuple[str, ...] = (),
     ) -> list[ImprovementCandidate]:
         prompt = BRAINSTORM_PROMPT.format(
-            goal=goal,
+            goal=goal or "(pure code optimization)",
             acceptance=acceptance_summary or "(none)",
+            code_signals=code_signals or "(none)",
+            prior="\n".join(f"- {title}" for title in prior_titles) or "(none)",
             iteration=iteration,
             snapshot=snapshot.to_dict() if snapshot is not None else {},
         )
@@ -88,13 +102,14 @@ class BrainstormStage:
                     id=str(raw.get("id") or f"I-{len(candidates) + 1}"),
                     title=str(raw.get("title") or ""),
                     description=str(raw.get("description") or ""),
+                    evidence=str(raw.get("evidence") or ""),
                 )
             )
         return [c for c in candidates if c.title]
 
 
 class PrioritizeStage:
-    """PRIORITIZE v1: fingerprint dedupe + top-N cap. Scorer arrives in P2."""
+    """PRIORITIZE v2: fingerprint dedupe + optional scoring + top-N cap."""
 
     def __init__(self, scheduler: PlanScheduler | None = None, cap: int = 3):
         self.scheduler = scheduler or PlanScheduler()
@@ -104,7 +119,20 @@ class PrioritizeStage:
         self,
         candidates: list[ImprovementCandidate],
         integrated_fingerprints: set[str],
+        use_scores: bool = False,
     ) -> tuple[list[ImprovementCandidate], list[ImprovementCandidate]]:
+        """Fingerprint dedupe + optional scoring + top-N cap.
+
+        use_scores=False preserves P1 behavior exactly. use_scores=True
+        classifies regressions (fingerprint previously integrated), scores
+        candidates (None score -> DEFAULT_UNSCORED_SCORE), keeps backlog
+        above BACKLOG_THRESHOLD sorted by score desc, parks the candidate
+        pool (0.5-0.75) and over-cap backlog, and rejects the rest.
+        """
+        from onep.harness.scorer import (
+            BACKLOG_THRESHOLD, DEFAULT_UNSCORED_SCORE, classify,
+        )
+
         backlog: list[ImprovementCandidate] = []
         parked: list[ImprovementCandidate] = []
         seen = set(integrated_fingerprints)
@@ -115,15 +143,36 @@ class PrioritizeStage:
                 summary=candidate.description,
             )
             candidate.fingerprint = self.scheduler.fingerprint(probe)
+            if candidate.fingerprint in integrated_fingerprints:
+                candidate.status = (
+                    "regression" if use_scores else "duplicate"
+                )
+                parked.append(candidate)
+                continue
             if candidate.fingerprint in seen:
                 candidate.status = "duplicate"
                 parked.append(candidate)
                 continue
             seen.add(candidate.fingerprint)
-            if len(backlog) < self.cap:
-                candidate.status = "backlog"
+            if not use_scores:
+                if len(backlog) < self.cap:
+                    candidate.status = "backlog"
+                    backlog.append(candidate)
+                else:
+                    candidate.status = "parked"
+                    parked.append(candidate)
+                continue
+            if candidate.score is None:
+                candidate.score = DEFAULT_UNSCORED_SCORE
+            candidate.status = classify(candidate.score)
+            if candidate.status == "backlog":
                 backlog.append(candidate)
             else:
-                candidate.status = "parked"
                 parked.append(candidate)
-        return backlog, parked
+        backlog.sort(key=lambda candidate: candidate.score or 0.0,
+                     reverse=True)
+        overflow = backlog[self.cap:]
+        for candidate in overflow:
+            candidate.status = "parked"
+            parked.append(candidate)
+        return backlog[:self.cap], parked

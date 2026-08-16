@@ -85,3 +85,82 @@ def test_prioritize_skips_integrated_fingerprints():
     backlog, parked = stage.run([duplicate], integrated)
     assert backlog == []
     assert parked[0].status == "duplicate"
+
+
+from onep.harness.scorer import DEFAULT_UNSCORED_SCORE
+
+
+def test_brainstorm_prompt_includes_evidence_requirement():
+    llm = BrainstormLLM(
+        '{"candidates": [{"id": "I-1", "title": "T", "description": "d", '
+        '"evidence": "REQ-1 slow"}]}'
+    )
+    stage = BrainstormStage(llm)
+    candidates = stage.run(
+        "g", "- REQ-1 ok", 1, None,
+        code_signals="pytest: 2 failed", prior_titles=["Add CLI"],
+    )
+    assert candidates[0].evidence == "REQ-1 slow"
+    prompt = llm.calls[0][1]
+    assert "evidence" in prompt
+    assert "pytest: 2 failed" in prompt
+    assert "Add CLI" in prompt
+
+
+def test_prioritize_with_scores_classifies_and_caps():
+    from onep.harness.discover import PrioritizeStage
+    stage = PrioritizeStage(cap=2)
+    candidates = [
+        ImprovementCandidate(id="I-1", title="High value thing",
+                             description="d", score=0.9),
+        ImprovementCandidate(id="I-2", title="Medium value thing",
+                             description="d", score=0.6),
+        ImprovementCandidate(id="I-3", title="Low value thing",
+                             description="d", score=0.3),
+    ]
+    backlog, parked = stage.run(candidates, set(), use_scores=True)
+    assert [c.id for c in backlog] == ["I-1"]
+    assert all(c.status == "backlog" for c in backlog)
+    statuses = {c.id: c.status for c in parked}
+    assert statuses["I-2"] == "parked"
+    assert statuses["I-3"] == "rejected"
+
+
+def test_prioritize_with_scores_caps_overflow_to_parked():
+    from onep.harness.discover import PrioritizeStage
+    stage = PrioritizeStage(cap=1)
+    candidates = [
+        ImprovementCandidate(id="I-1", title="High value alpha",
+                             description="d", score=0.95),
+        ImprovementCandidate(id="I-2", title="High value beta",
+                             description="d", score=0.90),
+    ]
+    backlog, parked = stage.run(candidates, set(), use_scores=True)
+    assert [c.id for c in backlog] == ["I-1"]
+    assert parked[0].id == "I-2"
+    assert parked[0].status == "parked"
+
+
+def test_prioritize_with_scores_marks_regressions():
+    from onep.harness.discover import PrioritizeStage
+    stage = PrioritizeStage(cap=3)
+    first = ImprovementCandidate(id="I-0", title="Add CLI", description="d")
+    first_backlog, _ = stage.run([first], set(), use_scores=True)
+    integrated = {first_backlog[0].fingerprint}
+    again = ImprovementCandidate(
+        id="I-9", title="Add CLI", description="same idea again", score=0.95,
+    )
+    backlog, parked = stage.run([again], integrated, use_scores=True)
+    assert backlog == []
+    assert parked[0].status == "regression"
+
+
+def test_prioritize_with_scores_defaults_unscored_to_backlog():
+    from onep.harness.discover import PrioritizeStage
+    stage = PrioritizeStage(cap=3)
+    candidate = ImprovementCandidate(id="I-1", title="Add CLI",
+                                     description="d", score=None)
+    backlog, parked = stage.run([candidate], set(), use_scores=True)
+    assert len(backlog) == 1
+    assert backlog[0].score == DEFAULT_UNSCORED_SCORE
+    assert parked == []
