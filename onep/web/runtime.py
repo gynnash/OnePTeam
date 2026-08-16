@@ -13,6 +13,12 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8311
 POLL_INTERVAL = 1.0
 HEARTBEAT_INTERVAL = 15.0
+# Consecutive empty poll cycles after which the stream closes itself. With the
+# default heartbeat interval (15s) heartbeats reset the counter, so the stream
+# stays open indefinitely; the bound only terminates streams whose heartbeat
+# interval is large or disabled (e.g. tests), where an endless stream could
+# never be closed by the client.
+MAX_EMPTY_POLLS = 500
 
 _RUN_ENTRY = (
     "import sys; "
@@ -93,6 +99,10 @@ def event_stream(workspace, poll: float = POLL_INTERVAL, max_events: int | None 
 
     flow-events.jsonl -> "flow", recorder events.jsonl -> "log",
     distillations.jsonl -> "distill", run.yaml changes -> "state".
+
+    The stream terminates after MAX_EMPTY_POLLS consecutive poll cycles that
+    produced no event (state change, tailed line, or heartbeat); heartbeats
+    and events reset the counter.
     """
     from onep.web import state as harness_state
     flow_path = harness_state.flow_events_path(workspace)
@@ -104,13 +114,15 @@ def event_stream(workspace, poll: float = POLL_INTERVAL, max_events: int | None 
         (run_dir / "distillations.jsonl" if run_dir else None, "distill"),
     ]
     cursors: dict[str, int] = {}
-    for _, path in tail_paths:
+    for path, _ in tail_paths:
         if path and path.exists():
             cursors[str(path)] = path.stat().st_size
     run_fp = _fingerprint(run_yaml)
     emitted = 0
     last_beat = time.monotonic()
+    empty_polls = 0
     while max_events is None or emitted < max_events:
+        cycle_start = emitted
         new_run_fp = _fingerprint(run_yaml)
         if new_run_fp != run_fp:
             run_fp = new_run_fp
@@ -118,7 +130,7 @@ def event_stream(workspace, poll: float = POLL_INTERVAL, max_events: int | None 
             if summary:
                 yield format_sse({"type": "state", "payload": summary})
                 emitted += 1
-        for kind, path in tail_paths:
+        for path, kind in tail_paths:
             if path is None or not path.exists():
                 continue
             size = path.stat().st_size
@@ -135,9 +147,21 @@ def event_stream(workspace, poll: float = POLL_INTERVAL, max_events: int | None 
                     if not line:
                         continue
                     try:
-                        payload = json.loads(line)
+                        raw = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(raw, dict):
+                        continue
+                    if kind == "flow":
+                        # flow_transition rows are envelopes around the stage
+                        # payload; mirror state.last_flow_stage/stage_history.
+                        payload = raw.get("payload")
+                        if not isinstance(payload, dict):
+                            continue
+                    else:
+                        # Recorder/log and distill rows carry their metadata at
+                        # the top level (stage, round, timestamp) — keep rows.
+                        payload = raw
                     yield format_sse({"type": kind, "payload": payload})
                     emitted += 1
         now = time.monotonic()
@@ -146,3 +170,9 @@ def event_stream(workspace, poll: float = POLL_INTERVAL, max_events: int | None 
             yield format_sse({"type": "heartbeat", "payload": {"at": _now()}})
             emitted += 1
         time.sleep(poll)
+        if emitted > cycle_start:
+            empty_polls = 0
+        else:
+            empty_polls += 1
+            if empty_polls > MAX_EMPTY_POLLS:
+                return
