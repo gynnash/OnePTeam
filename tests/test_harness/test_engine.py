@@ -1,5 +1,6 @@
 # tests/test_harness/test_engine.py
 from pathlib import Path
+from types import SimpleNamespace
 
 import git
 from rich.console import Console
@@ -18,6 +19,7 @@ from onep.llm.adapters import TokenUsage
 from onep.persistence.models import Project, ProjectMode, ProjectStatus
 from onep.persistence.state import load_state, save_state
 from onep.strategy.optimize_engine import EngineAttemptResult
+from onep.strategy.optimize_models import PlanRecord, PlanStatus
 
 
 class FakeLLM:
@@ -477,3 +479,139 @@ def test_harness_research_evidence_reaches_architecture_doc(tmp_path, monkeypatc
     assert "evidence_citations" in architecture_md
     assert "cli/repo" in architecture_md
     assert client.searches == ["cli patterns"]
+
+
+def _brownfield_project(tmp_path):
+    return Project("demo", ProjectMode.BROWNFIELD, str(tmp_path), "")
+
+
+class BrownfieldFakeLLM(FakeLLM):
+    def invoke(self, system_prompt, user_prompt, stage_name):
+        if stage_name == "harness_brainstorm":
+            return '{"candidates": []}'
+        return super().invoke(system_prompt, user_prompt, stage_name)
+
+
+class BrownfieldCoordinator:
+    executed = []
+
+    def __init__(self, engine, test_runner, reviewer, git_session,
+                 llm=None, recorder=None, cost_tracker=None,
+                 project_context="", **kwargs):
+        pass
+
+    def develop_plan(self, candidate, plan_text, session):
+        self.executed.append(candidate.id)
+        record = PlanRecord(candidate, status=PlanStatus.COMMITTED)
+        record.commit_sha = "beef42"
+        return record
+
+    def integrate_plan(self, record, session, commands):
+        record.status = PlanStatus.INTEGRATED
+        return record
+
+
+class BrownfieldSession:
+    def __init__(self, source_path, run_dir, run_id):
+        self.source_path = source_path
+        self.branches = []
+
+    def create_integration_branch(self):
+        self.branches.append("integration")
+        return "integration"
+
+    def create_plan_session(self, plan_id, title):
+        self.branches.append(plan_id)
+        return SimpleNamespace(
+            branch_name=f"plan-{plan_id}", worktree=self.source_path,
+            base_commit="c0ffee",
+        )
+
+
+def test_harness_brownfield_loop_scans_builds_and_stops(tmp_path, monkeypatch):
+    from onep.strategy.models import StrategyItem
+
+    repo = _repo(tmp_path)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+    (tmp_path / "app.py").write_text("value = 1\n")
+    repo.index.add(["pyproject.toml", "app.py"])
+    repo.index.commit("source")
+
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    monkeypatch.setattr(
+        "onep.harness.engine.analyze_source",
+        lambda source, llm, tracker=None, project_name="", source_files=None,
+        **kwargs: [StrategyItem(
+            id="si-1", title="Cache", file_location="app.py:1",
+            summary="cache issue", tags=["cache"], impact="medium",
+        )],
+    )
+    monkeypatch.setattr(
+        "onep.harness.engine.generate_optimize_plan",
+        lambda item, workspace, llm_adapter, plan_index=1, memory_context="":
+        SimpleNamespace(
+            plan_path=str(Path(workspace) / "plan.md"),
+            plan_markdown="# plan",
+            expected_files=("app.py",),
+            dependencies=(),
+            test_commands=("pytest -q",),
+            risk_flags=(),
+        ),
+    )
+    monkeypatch.setattr(
+        "onep.harness.brownfield.GitRunSession", BrownfieldSession)
+    BrownfieldCoordinator.executed.clear()
+    monkeypatch.setattr(
+        "onep.harness.brownfield.OptimizeCoordinator",
+        BrownfieldCoordinator,
+    )
+    # The scope gate / integration runner is bypassed by the fake
+    # coordinator; integration commands resolve from the manifest.
+    engine = HarnessEngine(llm=BrownfieldFakeLLM())
+
+    success = engine.run(
+        _brownfield_project(tmp_path),
+        GreenfieldOptions(
+            max_rounds=4, test_commands=["pytest -q"], deploy_mode="none",
+        ),
+    )
+
+    assert success is True
+    run = load_harness_run(tmp_path)
+    assert run.mode == "brownfield"
+    assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
+    assert run.iteration == 1
+    assert [item.id for item in run.work_items] == ["si-1"]
+    assert all(item.status == "completed" for item in run.work_items)
+    assert len(run.quality_history) == 1
+    assert run.quality_history[0].hard_gates_passed is True
+    assert BrownfieldCoordinator.executed == ["si-1"]
+
+
+def test_harness_brownfield_empty_scan_stops_immediately(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (tmp_path / "app.py").write_text("x = 1\n")
+    repo.index.add(["app.py"])
+    repo.index.commit("source")
+
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    monkeypatch.setattr(
+        "onep.harness.engine.analyze_source",
+        lambda *args, **kwargs: [],
+    )
+    engine = HarnessEngine(llm=BrownfieldFakeLLM())
+
+    success = engine.run(
+        _brownfield_project(tmp_path),
+        GreenfieldOptions(
+            max_rounds=4, test_commands=["pytest -q"], deploy_mode="none",
+        ),
+    )
+
+    assert success is True
+    run = load_harness_run(tmp_path)
+    assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
+    assert run.work_items == []
+    assert run.iteration == 0

@@ -24,7 +24,8 @@ class HarnessStage(str, Enum):
 _ALLOWED: dict[HarnessStage, set[HarnessStage]] = {
     HarnessStage.INIT: {HarnessStage.UNDERSTAND},
     HarnessStage.UNDERSTAND: {
-        HarnessStage.RESEARCH, HarnessStage.FAILED, HarnessStage.CANCELLED,
+        HarnessStage.RESEARCH, HarnessStage.PLAN, HarnessStage.STOP,
+        HarnessStage.FAILED, HarnessStage.CANCELLED,
     },
     HarnessStage.RESEARCH: {
         HarnessStage.DESIGN, HarnessStage.FAILED, HarnessStage.CANCELLED,

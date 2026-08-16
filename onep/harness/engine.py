@@ -13,6 +13,7 @@ from onep.greenfield.gates import GreenfieldGateRunner
 from onep.greenfield.git_session import GreenfieldGitSession
 from onep.greenfield.models import (
     AcceptanceContract,
+    AcceptanceItem,
     GreenfieldOptions,
     GreenfieldRun,
     GreenfieldStage,
@@ -24,6 +25,7 @@ from onep.harness.discover import BrainstormStage, PrioritizeStage
 from onep.harness.research import ResearchStage
 from onep.harness.scorer import OpportunityScorer
 from onep.harness.models import (
+    CandidateAdapter,
     HarnessOptions,
     HarnessRun,
     SliceAdapter,
@@ -36,14 +38,23 @@ from onep.harness.persistence import (
     save_harness_run,
     stop_requested,
 )
+from onep.harness.brownfield import (
+    BrownfieldBuildStage, BrownfieldUnderstandStage,
+)
 from onep.harness.reflect import ReflectStage, evaluate_stop
 from onep.harness.states import HarnessFlow, HarnessStage
-from onep.harness.understand import HarnessUnsupportedMode, UnderstandStage
+from onep.harness.understand import (
+    HarnessUnsupportedMode, UnderstandStage, detect_mode,
+)
 from onep.llm.adapters import LLMAdapter
 from onep.llm.cost import CostTracker
 from onep.persistence.database import update_project
 from onep.persistence.models import Project, ProjectMode, ProjectStatus
 from onep.persistence.state import load_state
+from onep.strategy.analyze_pipeline import analyze_source
+from onep.strategy.gates import discover_required_test_commands
+from onep.strategy.models import StrategyItem
+from onep.strategy.planner import generate_optimize_plan
 
 
 class HarnessEngine:
@@ -84,10 +95,11 @@ class HarnessEngine:
         elif options is not None:
             run.options = HarnessOptions.from_greenfield(options)
         if run.mode != "greenfield":
-            raise HarnessUnsupportedMode(
-                "Brownfield harness unification lands in P2; "
-                "use `onep optimize` meanwhile."
-            )
+            detected = detect_mode(workspace, run.original_goal)
+            if detected != "greenfield":
+                run.mode = detected
+                save_harness_run(run)
+                return self._run_brownfield(project, run, workspace, options)
 
         gf_run = run.greenfield_run
         if gf_run is None:
@@ -438,6 +450,251 @@ class HarnessEngine:
                 project, gf_run, recorder,
                 self.kernel._failure_type(exc), str(exc),
             )
+
+    def _run_brownfield(
+        self,
+        project: Project,
+        run: HarnessRun,
+        workspace: Path,
+        options: GreenfieldOptions | None,
+    ) -> bool:
+        """Brownfield loop: scan UNDERSTAND -> candidate BUILD -> Product
+        Loop. Greenfield and brownfield share REFLECT/DISCOVER/PRIORITIZE."""
+        from onep.strategy.optimize_models import PlanCandidate
+
+        run_dir = workspace / ".onep" / "optimize" / "runs" / run.id
+        tracker = CostTracker(run.options.max_cost)
+        commands = list(run.options.test_commands) or list(
+            discover_required_test_commands(workspace)
+        )
+        if not commands:
+            run.status = "failed"
+            save_harness_run(run)
+            self.console.print(
+                "[red]brownfield 需要测试命令[/red]：提供 --test-command 或 "
+                "项目清单（pyproject.toml / pytest.ini / package.json 等）"
+            )
+            return False
+        run.status = "running"
+        project.status = ProjectStatus.RUNNING
+        update_project(project)
+        save_harness_run(run)
+        flow = HarnessFlow()
+        try:
+            flow.start_iteration(1)
+            flow.transition(HarnessStage.UNDERSTAND)
+            candidates, plans = BrownfieldUnderstandStage(
+                self.llm,
+                analyzer=analyze_source,
+                planner=generate_optimize_plan,
+            ).run(
+                workspace, run.project_name, tuple(commands), tracker=tracker,
+            )
+            run.work_items = [
+                CandidateAdapter.to_work_item(candidate)
+                for candidate in candidates
+            ]
+            run.work_item_plans = dict(plans)
+            if not run.work_items:
+                run.stop_state = {
+                    "reason": StopReason.GOALS_SATISFIED.value,
+                    "evidence": {
+                        "iteration": 0,
+                        "note": "scan found no optimization opportunities",
+                    },
+                }
+                flow.transition(HarnessStage.STOP, {
+                    "reason": StopReason.GOALS_SATISFIED.value,
+                })
+                self._complete_brownfield(project, run, tracker)
+                return True
+
+            build = BrownfieldBuildStage(
+                workspace, run_dir, run.id, self.llm, tracker=tracker,
+            )
+            while True:
+                run.iteration += 1
+                flow.start_iteration(run.iteration)
+                flow.transition(HarnessStage.PLAN)
+                if stop_requested(workspace):
+                    run.stop_state = {
+                        "reason": StopReason.USER_STOP.value,
+                        "evidence": {"iteration": run.iteration},
+                    }
+                    flow.transition(HarnessStage.STOP, {
+                        "reason": StopReason.USER_STOP.value,
+                    })
+                    break
+                pending = [
+                    item for item in run.work_items
+                    if item.status == "pending"
+                ]
+                if not pending:
+                    run.stop_state = {
+                        "reason": StopReason.GOALS_SATISFIED.value,
+                        "evidence": {"iteration": run.iteration},
+                    }
+                    flow.transition(HarnessStage.STOP, {
+                        "reason": StopReason.GOALS_SATISFIED.value,
+                    })
+                    break
+
+                flow.transition(HarnessStage.BUILD)
+                result = build.build(
+                    pending, run.work_item_plans, commands
+                )
+                by_id = {item.id: item for item in result["items"]}
+                for item in run.work_items:
+                    if item.id in by_id:
+                        updated = by_id[item.id]
+                        item.status = updated.status
+                        item.attempts = updated.attempts
+                        item.commit_sha = updated.commit_sha
+                run.spent = tracker.spent
+
+                flow.transition(HarnessStage.REFLECT)
+                contract = self._synthesized_contract(run.work_items)
+                snapshot = ReflectStage().run(
+                    None, contract, result["integration_passed"],
+                    run.iteration,
+                    llm=self.llm, tracker=tracker,
+                    track=self.kernel._track,
+                )
+                run.quality_history.append(snapshot)
+                if not result["integration_passed"]:
+                    raise RuntimeError(
+                        "brownfield hard gates unsatisfied after build round"
+                    )
+
+                flow.transition(HarnessStage.DISCOVER)
+                candidates = BrainstormStage(
+                    self.llm, track=self.kernel._track
+                ).run(
+                    goal=run.original_goal or "(pure code optimization)",
+                    acceptance_summary=self._acceptance_summary(contract),
+                    iteration=run.iteration,
+                    snapshot=snapshot,
+                    tracker=tracker,
+                    code_signals=self._code_signals(run),
+                    prior_titles=tuple(
+                        candidate.title
+                        for candidate in run.improvement_candidates
+                    ),
+                )
+
+                flow.transition(HarnessStage.PRIORITIZE)
+                scored = self.scorer.score_candidates(
+                    candidates,
+                    run.original_goal or "(pure code optimization)",
+                    self._acceptance_summary(contract),
+                    run.iteration,
+                    tracker,
+                )
+                backlog, parked = PrioritizeStage().run(
+                    scored, self._integrated_fingerprints(run),
+                    use_scores=True,
+                )
+                run.improvement_candidates = [
+                    *[c for c in run.improvement_candidates
+                       if c.status not in {
+                           "parked", "duplicate", "rejected", "regression",
+                       }],
+                    *backlog,
+                    *parked,
+                ]
+                decision = evaluate_stop(run, snapshot, backlog,
+                                         scored=scored)
+                save_harness_run(run)
+                if decision.stop:
+                    run.stop_state = {
+                        "reason": decision.reason.value,
+                        "evidence": decision.evidence,
+                    }
+                    flow.transition(HarnessStage.STOP, {
+                        "reason": decision.reason.value,
+                        **decision.evidence,
+                    })
+                    break
+                for index, candidate in enumerate(backlog):
+                    candidate.status = "integrated"
+                    probe = PlanCandidate(
+                        id=f"iter{run.iteration}-{index + 1}",
+                        title=candidate.title,
+                        summary=candidate.description,
+                    )
+                    item = CandidateAdapter.to_work_item(probe)
+                    run.work_items.append(item)
+                    run.work_item_plans[item.id] = (
+                        self._plan_text_for(candidate, workspace, index)
+                    )
+                flow.transition(HarnessStage.RESEARCH, {
+                    "mode": "lightweight", "brownfield": True,
+                })
+                flow.transition(HarnessStage.DESIGN, {"incremental": True})
+                save_harness_run(run)
+
+            self._complete_brownfield(project, run, tracker)
+            return True
+        except Exception as exc:
+            run.status = "failed"
+            run.stop_state = {
+                "reason": "error", "evidence": {"error": str(exc)},
+            }
+            save_harness_run(run)
+            project.status = ProjectStatus.FAILED
+            update_project(project)
+            self.console.print(f"[red]brownfield 运行失败: {exc}[/red]")
+            return False
+
+    def _complete_brownfield(self, project, run, tracker) -> None:
+        run.stage = "stop"
+        run.status = "completed"
+        run.ended_at = datetime.now(timezone.utc).isoformat()
+        run.spent = tracker.spent
+        save_harness_run(run)
+        project.status = ProjectStatus.COMPLETED
+        project.current_stage = ""
+        project.touch()
+        update_project(project)
+        self.console.print(
+            f"[bold green]Brownfield 闭环完成[/bold green]\n"
+            f"[green]Stop: {run.stop_state.get('reason')}[/green]\n"
+            f"[dim]Iterations: {run.iteration}[/dim]"
+        )
+
+    @staticmethod
+    def _synthesized_contract(items) -> AcceptanceContract:
+        """Brownfield REFLECT anchor: each WorkItem is an acceptance item."""
+        return AcceptanceContract([
+            AcceptanceItem(
+                id=item.id,
+                priority="P0",
+                behavior=item.objective,
+                status="passed" if item.status == "completed" else "pending",
+            )
+            for item in items
+        ])
+
+    @staticmethod
+    def _code_signals(run: HarnessRun) -> str:
+        lines = []
+        for item in run.work_items:
+            lines.append(
+                f"- {item.id} [{item.status}] attempts={item.attempts}"
+            )
+        return "\n".join(lines) or "(none)"
+
+    def _plan_text_for(self, candidate, workspace: Path, index: int) -> str:
+        item = StrategyItem(
+            id=candidate.id,
+            title=candidate.title,
+            file_location="unknown",
+            summary=candidate.description,
+        )
+        generated = generate_optimize_plan(
+            item, workspace, self.llm, plan_index=index + 1
+        )
+        return generated.plan_markdown
 
     @staticmethod
     def _acceptance_summary(contract: AcceptanceContract) -> str:
