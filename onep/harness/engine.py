@@ -24,6 +24,7 @@ from onep.harness.models import (
     HarnessOptions,
     HarnessRun,
     SliceAdapter,
+    StopReason,
     candidate_to_slice,
 )
 from onep.harness.persistence import (
@@ -39,6 +40,7 @@ from onep.llm.adapters import LLMAdapter
 from onep.llm.cost import CostTracker
 from onep.persistence.database import update_project
 from onep.persistence.models import Project, ProjectMode, ProjectStatus
+from onep.persistence.state import load_state
 
 
 class HarnessEngine:
@@ -72,7 +74,6 @@ class HarnessEngine:
                     options or GreenfieldOptions()
                 ),
             )
-            clear_stop_request(workspace)
             save_harness_run(run)
         elif options is not None:
             run.options = HarnessOptions.from_greenfield(options)
@@ -84,13 +85,15 @@ class HarnessEngine:
 
         gf_run = run.greenfield_run
         if gf_run is None:
-            gf_run = GreenfieldRun(
-                id=f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}",
-                project_name=project.name,
-                requirement=project.requirement,
-                workspace=str(workspace),
-                options=options or GreenfieldOptions(),
-            )
+            gf_run = self._adopt_legacy_run(workspace)
+            if gf_run is None:
+                gf_run = GreenfieldRun(
+                    id=f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}",
+                    project_name=project.name,
+                    requirement=project.requirement,
+                    workspace=str(workspace),
+                    options=options or GreenfieldOptions(),
+                )
             run.greenfield_run = gf_run
         elif options is not None:
             gf_run.options = options
@@ -110,6 +113,10 @@ class HarnessEngine:
                 gf_run.base_branch = session.base_branch
                 gf_run.base_commit = session.base_commit
                 gf_run.run_branch = session.run_branch
+            # Clear any stop request left behind by a previous run whenever
+            # a run transitions to running; otherwise a user_stop would
+            # wedge every subsequent resume at PLAN.
+            clear_stop_request(workspace)
             gf_run.status = GreenfieldStatus.RUNNING
             run.status = "running"
             project.status = ProjectStatus.RUNNING
@@ -160,6 +167,20 @@ class HarnessEngine:
                     raise RuntimeError(
                         "acceptance contract missing from resumable run"
                     )
+                # Resume parity: the kernel applied these plan-consistency
+                # steps on every resume; the harness must too, or the
+                # persisted plan drifts from the contract.
+                self.kernel._sanitize_generated_commands(
+                    gf_run, contract, recorder
+                )
+                self.kernel._normalize_slice_plans(
+                    gf_run, contract, recorder
+                )
+                self.kernel._write_design_docs(
+                    workspace, gf_run, contract,
+                    self.kernel._load_architecture(run_dir),
+                )
+                self.kernel._commit_design_docs(session)
 
             while True:
                 run.iteration += 1
@@ -259,6 +280,30 @@ class HarnessEngine:
                 flow.transition(HarnessStage.DESIGN, {"incremental": True})
                 save_harness_run(run)
 
+            if (
+                run.stop_state.get("reason") == StopReason.USER_STOP.value
+                and not (contract is not None and contract.required_complete)
+            ):
+                # The user asked to stop before the contract is satisfied;
+                # running the finalize tail would fail the gates and turn a
+                # graceful stop into a failed project. Park the run instead.
+                run.stage = "stop"
+                run.status = "stopped"
+                run.ended_at = datetime.now(timezone.utc).isoformat()
+                run.spent = tracker.spent
+                recorder.save_run()
+                save_harness_run(run)
+                project.status = ProjectStatus.PAUSED
+                project.current_stage = "stop"
+                project.touch()
+                update_project(project)
+                self.console.print(
+                    f"[bold yellow]STOPPED [USER_REQUEST][/bold yellow]\n"
+                    f"运行已按用户请求停止；执行 onep run {project.name} 可随时继续\n"
+                    f"记录: {run_dir}"
+                )
+                return True
+
             mandatory = self.kernel._final_gate_commands(
                 workspace, gf_run, contract
             )
@@ -324,6 +369,23 @@ class HarnessEngine:
         return "\n".join(
             f"- {item.id} [{item.priority}] {item.behavior} ({item.status})"
             for item in contract.items
+        )
+
+    @staticmethod
+    def _adopt_legacy_run(workspace: Path) -> GreenfieldRun | None:
+        """Adopt an in-flight kernel-era greenfield run, if one exists.
+
+        Projects created before the harness lands persist their greenfield
+        run id in .onep/state.yaml (artifacts.greenfield_run_id) and commit
+        work on onep/greenfield-* branches. Resume that run instead of
+        silently restarting discovery and stranding the committed work.
+        """
+        state = load_state(workspace)
+        run_id = state.artifacts.get("greenfield_run_id")
+        if not run_id:
+            return None
+        return GreenfieldRecorder.load(
+            workspace / ".onep" / "greenfield" / "runs" / run_id / "run.yaml"
         )
 
     @staticmethod
