@@ -18,31 +18,34 @@ from onep.tools.git import GitTool
 console = Console()
 
 
-@click.command()
-@click.argument("requirement", type=str)
-@click.option("--name", "-n", default=None, help="Project name")
-@click.option("--no-run", is_flag=True, help="Initialize without running")
-@click.option("--max-rounds", type=click.IntRange(1), default=100, show_default=True)
-@click.option("--max-repairs-per-slice", type=click.IntRange(1), default=8, show_default=True)
-@click.option("--max-cost", type=click.FloatRange(min=0), default=0, show_default=True)
-@click.option("--test-command", "test_commands", multiple=True, help="Mandatory quality gate; repeatable")
-@click.option("--deploy-mode", type=click.Choice(["verify", "local", "none"]), default="verify", show_default=True)
-@click.option("--non-interactive", is_flag=True, help="Persist blockers instead of prompting")
-@click.option("--verbose", is_flag=True, help="Show detailed traces")
-def create_cmd(
-    requirement: str, name: str | None, no_run: bool, max_rounds: int,
-    max_repairs_per_slice: int, max_cost: float,
-    test_commands: tuple[str, ...], deploy_mode: str,
-    non_interactive: bool, verbose: bool,
-):
-    """Create a project and start the autonomous engineering loop."""
+def default_project_name(requirement: str) -> str:
+    clean = re.sub(r"[^\w一-鿿]", "", requirement or "")[:20]
+    return clean or f"project-{uuid.uuid4().hex[:6]}"
+
+
+def create_project(
+    requirement: str,
+    name: str | None = None,
+    workspace: Path | None = None,
+    options=None,
+) -> Project:
+    """Create a project workspace (git init, README, state) and its DB row.
+
+    Does not start the loop; callers run it via run_pipeline (CLI) or the
+    web console's spawned subprocess.
+    """
     init_db()
-
     if name is None:
-        clean = re.sub(r'[^\w一-鿿]', '', requirement)[:20]
-        name = clean or f"project-{uuid.uuid4().hex[:6]}"
-
-    workspace, repository_exists = _resolve_workspace(Path.cwd())
+        name = default_project_name(requirement)
+    if workspace is None:
+        workspace, _ = _resolve_workspace(Path.cwd())
+    workspace = Path(workspace).resolve()
+    repository_exists = False
+    try:
+        git_module.Repo(workspace)
+        repository_exists = True
+    except (git_module.InvalidGitRepositoryError, git_module.NoSuchPathError):
+        repository_exists = False
 
     git_tool = GitTool(workspace=str(workspace))
     if repository_exists:
@@ -52,7 +55,7 @@ def create_cmd(
                 "Current Git repository is dirty. Commit or stash changes first: "
                 + ", ".join(dirty)
             )
-    (workspace / "docs").mkdir(exist_ok=True)
+    (workspace / "docs").mkdir(parents=True, exist_ok=True)
     readme = workspace / "README.md"
     readme_created = not readme.exists()
     if not readme.exists():
@@ -67,14 +70,32 @@ def create_cmd(
         git_tool.run(operation="commit", message="chore: initialize onep greenfield project")
     _exclude_onep_runtime(repo)
 
-    project = Project(
-        name=name,
-        mode=ProjectMode.GREENFIELD,
-        workspace_path=str(workspace),
-    )
+    project = Project(name=name, mode=ProjectMode.GREENFIELD, workspace_path=str(workspace))
     project.requirement = requirement
     insert_project(project)
 
+    if options is None:
+        from onep.greenfield.models import GreenfieldOptions
+        options = GreenfieldOptions()
+    state = PipelineState(artifacts={"greenfield_options": options.to_dict()})
+    save_state(workspace, state)
+    return project
+
+
+@click.command()
+@click.argument("requirement", type=str)
+@click.option("--name", "-n", default=None, help="Project name")
+@click.option("--no-run", is_flag=True, help="Initialize without running")
+@click.option("--max-rounds", type=click.IntRange(1), default=100, show_default=True)
+@click.option("--max-repairs-per-slice", type=click.IntRange(1), default=8, show_default=True)
+@click.option("--max-cost", type=click.FloatRange(min=0), default=0, show_default=True)
+@click.option("--test-command", "test_commands", multiple=True, help="Mandatory quality gate; repeatable")
+@click.option("--deploy-mode", type=click.Choice(["verify", "local", "none"]), default="verify", show_default=True)
+@click.option("--non-interactive", is_flag=True, help="Persist blockers instead of prompting")
+@click.option("--verbose", is_flag=True, help="Show detailed traces")
+def create_cmd(requirement, name, no_run, max_rounds, max_repairs_per_slice,
+               max_cost, test_commands, deploy_mode, non_interactive, verbose):
+    """Create a project and start the autonomous engineering loop."""
     from onep.greenfield.models import GreenfieldOptions
     options = GreenfieldOptions(
         max_rounds=max_rounds,
@@ -85,23 +106,20 @@ def create_cmd(
         non_interactive=non_interactive,
         verbose=verbose,
     )
-    state = PipelineState(artifacts={"greenfield_options": options.to_dict()})
-    save_state(workspace, state)
-
+    project = create_project(requirement, name=name, options=options)
     console.print(Panel.fit(
-        f"[bold green]Project '{name}' created![/bold green]\n"
-        f"Workspace: {workspace}\n"
+        f"[bold green]Project '{project.name}' created![/bold green]\n"
+        f"Workspace: {project.workspace_path}\n"
         f"Mode: Greenfield autonomous loop\n\n"
-        + (f"Run [bold cyan]onep run {name}[/bold cyan] to start."
+        + (f"Run [bold cyan]onep run {project.name}[/bold cyan] to start."
            if no_run else "Starting autonomous engineering loop..."),
         title="OnePTeam",
     ))
-
     if not no_run:
         from onep.orchestrator.runner import run_pipeline
-        if not run_pipeline(name, options=options):
+        if not run_pipeline(project.name, options=options):
             raise click.ClickException(
-                f"Run did not complete. Resume with: onep run {name}"
+                f"Run did not complete. Resume with: onep run {project.name}"
             )
 
 

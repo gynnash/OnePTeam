@@ -18,6 +18,9 @@ dependencies = [
     "docker>=7.0",
     "litellm>=1.50",
     "python-dotenv>=1.0",
+    # Web console (P4). Already present transitively via litellm's proxy extra; now a first-class dependency.
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
 ]
 
 [project.scripts]

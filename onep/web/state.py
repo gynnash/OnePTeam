@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from onep.harness.models import HarnessRun
-from onep.harness.persistence import load_harness_run
+from onep.harness.persistence import harness_run_path, load_harness_run
 from onep.harness.states import HarnessStage
 
 
