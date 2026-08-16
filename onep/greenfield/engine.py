@@ -11,6 +11,8 @@ import shlex
 import sys
 import uuid
 
+from typing import Any, Callable
+
 import click
 from rich.console import Console
 import yaml
@@ -249,6 +251,7 @@ class GreenfieldEngine:
         session: GreenfieldGitSession, mandatory: list[str],
         gate_runner: GreenfieldGateRunner, recorder: GreenfieldRecorder,
         tracker: CostTracker, detector: AttemptStagnationDetector,
+        distill: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         feedback = ""
         last_events: tuple[dict, ...] = ()
@@ -273,7 +276,7 @@ class GreenfieldEngine:
             recorder.trace(
                 "STATE",
                 f"累计工程轮次 {run.round_number}；本次剩余 "
-                f"{run.options.max_rounds - (run.round_number - self._round_start)}；"
+                f"{run.options.max_rounds - (run.round_number - getattr(self, '_round_start', run.round_number))}；"
                 f"当前切片修复 {repair}/{run.options.max_repairs_per_slice}",
                 "blue",
             )
@@ -389,6 +392,16 @@ class GreenfieldEngine:
                 )
                 self._track(tracker, "code_reviewer")
                 recorder.save_review(plan, review.to_dict())
+                if distill is not None:
+                    distill("review_complete", {
+                        "plan_id": plan.id,
+                        "plan_title": plan.title,
+                        "iteration": run.round_number,
+                        "review_passed": review.passed,
+                        "review_findings": list(review.findings),
+                        "changed": list(changed),
+                        "diff": diff,
+                    })
                 if not review.passed:
                     failure_type = "review_failed"
                     raw_error = "\n".join(review.findings) or review.summary
@@ -409,6 +422,17 @@ class GreenfieldEngine:
                 recorder.clear_wip(plan)
                 recorder.save_diff(plan, diff)
                 recorder.save_slice(plan)
+                if distill is not None:
+                    distill("slice_complete", {
+                        "plan_id": plan.id,
+                        "plan_title": plan.title,
+                        "iteration": run.round_number,
+                        "attempts": plan.attempts,
+                        "commit_sha": plan.commit_sha,
+                        "changed": list(changed),
+                        "diff": diff,
+                        "tests_passed": bool(tests and tests.passed),
+                    })
                 self._mark_acceptance(contract, plan, current_mandatory)
                 recorder.save_contract(contract)
                 recorder.trace("SLICE", f"{plan.title} 已通过并提交 {plan.commit_sha[:8]}", "green")
@@ -422,6 +446,19 @@ class GreenfieldEngine:
             recorder.event("repair_brief", brief.to_dict())
             if detector.observe(brief):
                 session.rollback_attempt()
+                if distill is not None:
+                    distill("repair_failed", {
+                        "plan_id": plan.id,
+                        "plan_title": plan.title,
+                        "iteration": run.round_number,
+                        "retry_count": repair + 1,
+                        "loop_stagnant": True,
+                        "failure_type": brief.failure_type,
+                        "primary_error": brief.primary_error,
+                        "failing_command": brief.failing_command,
+                        "diff_sha": brief.diff_sha,
+                        "files": list(brief.relevant_files),
+                    })
                 raise RuntimeError(
                     "Loop stuck: the same failure and diff repeated 3 times. "
                     + brief.primary_error
@@ -430,6 +467,19 @@ class GreenfieldEngine:
             recorder.trace("REPAIR", f"{brief.failure_type}: {brief.primary_error[:240]}", "yellow")
             if repair >= run.options.max_repairs_per_slice:
                 session.rollback_attempt()
+                if distill is not None:
+                    distill("repair_failed", {
+                        "plan_id": plan.id,
+                        "plan_title": plan.title,
+                        "iteration": run.round_number,
+                        "retry_count": repair + 1,
+                        "loop_stagnant": False,
+                        "failure_type": brief.failure_type,
+                        "primary_error": brief.primary_error,
+                        "failing_command": brief.failing_command,
+                        "diff_sha": brief.diff_sha,
+                        "files": list(brief.relevant_files),
+                    })
                 raise RuntimeError(
                     f"Repair attempts exhausted for {plan.id}: {brief.primary_error}"
                 )
@@ -440,6 +490,7 @@ class GreenfieldEngine:
         session: GreenfieldGitSession, mandatory: list[str],
         gate_runner: GreenfieldGateRunner, recorder: GreenfieldRecorder,
         tracker: CostTracker, allow_repair: bool = True,
+        distill: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         run.stage = GreenfieldStage.FULL_VERIFY
         if not mandatory:
@@ -481,13 +532,14 @@ class GreenfieldEngine:
                 self._execute_slice(
                     run, plan, contract, session, mandatory, gate_runner,
                     recorder, tracker, AttemptStagnationDetector(3),
+                    distill=distill,
                 )
                 refreshed = list(dict.fromkeys([
                     *discover_quality_commands(session.workspace), *mandatory,
                 ]))
                 return self._final_verify(
                     run, contract, session, refreshed, gate_runner,
-                    recorder, tracker, allow_repair=False,
+                    recorder, tracker, allow_repair=False, distill=distill,
                 )
             raise RuntimeError("Final architecture review failed: " + detail)
         run.stage = GreenfieldStage.DEPLOY_VERIFY
@@ -511,10 +563,11 @@ class GreenfieldEngine:
                 self._execute_slice(
                     run, plan, contract, session, mandatory, gate_runner,
                     recorder, tracker, AttemptStagnationDetector(3),
+                    distill=distill,
                 )
                 return self._final_verify(
                     run, contract, session, mandatory, gate_runner,
-                    recorder, tracker, allow_repair=False,
+                    recorder, tracker, allow_repair=False, distill=distill,
                 )
             raise RuntimeError(f"Deployment verification failed: {failed.command}")
 
@@ -916,6 +969,7 @@ class GreenfieldEngine:
         recorder: GreenfieldRecorder,
         tracker: CostTracker,
         respect_satisfied_early_exit: bool = True,
+        distill: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> bool:
         """Execute pending slices until satisfied or exhausted.
 
@@ -938,7 +992,7 @@ class GreenfieldEngine:
             run.current_slice = index
             self._execute_slice(
                 run, plan, contract, session, mandatory, gate_runner,
-                recorder, tracker, detector,
+                recorder, tracker, detector, distill=distill,
             )
             mandatory = self._slice_gate_commands(workspace, run)
             if (
@@ -1355,7 +1409,8 @@ class GreenfieldEngine:
     def _check_budget_rounds(
         self, run: GreenfieldRun, tracker: CostTracker,
     ) -> None:
-        if run.round_number - self._round_start >= run.options.max_rounds:
+        round_start = getattr(self, "_round_start", run.round_number)
+        if run.round_number - round_start >= run.options.max_rounds:
             raise RuntimeError(f"Maximum engineering rounds reached: {run.options.max_rounds}")
         if not tracker.can_continue():
             raise RuntimeError(f"Cost budget exhausted: {tracker.summary()}")
