@@ -105,3 +105,12 @@ def test_global_vault_root_config_and_default(tmp_path, monkeypatch):
     assert global_vault_root() == Path("/tmp/custom-vault")
     (tmp_path / "config.yaml").write_text("pipeline:\n  test_timeout: 5\n")
     assert global_vault_root() == Path.home() / ".onep" / "vault"
+
+
+def test_global_vault_root_defaults_on_wrong_config_shape(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        "onep.harness.vault._config_path", lambda: tmp_path / "config.yaml")
+    (tmp_path / "config.yaml").write_text("knowledge: true\n")
+    assert global_vault_root() == Path("~/.onep/vault").expanduser()

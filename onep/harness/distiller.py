@@ -125,8 +125,8 @@ class KnowledgeDistiller:
 
         The greenfield kernel records one "repair_brief" event per failed
         repair attempt and starts every slice attempt with a "SLICE i/n"
-        trace (greenfield/engine.py:270). Every successful slice ends with
-        a trace whose label is exactly "SLICE" (line 414). Entries are
+        trace (greenfield/engine.py:276). Every successful slice ends with
+        a trace whose label is exactly "SLICE" (line 438). Entries are
         grouped per slice using these completion traces as separators; other
         noise (traces, engineer_trajectory) is dropped, and the repair_brief
         entries between two completion traces merge into a single entry

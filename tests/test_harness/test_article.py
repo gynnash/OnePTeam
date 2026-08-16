@@ -94,6 +94,24 @@ def test_synthesize_writes_article_and_graph(tmp_path):
     ]
 
 
+def test_synthesize_no_events_skips_insight_llm(tmp_path):
+    workspace, run_dir, run = _article_fixture(tmp_path)
+    (run_dir / "distillations.jsonl").unlink()
+    llm = ArticleLLM([
+        '{"events": []}',
+        '{"title": "Demo Journey", "markdown": "# Demo Journey\\n\\n'
+        '## What We Initially Believed\\n\\nNothing recorded.\\n"}',
+    ])
+    writer = VaultWriter(tmp_path / "global", tmp_path / "project")
+    result = ArticleSynthesizer(llm, writer).synthesize(
+        workspace, run_dir, run)
+    assert result["article_path"].exists()
+    assert "harness_article_insight" not in llm.calls
+    assert llm.calls == [
+        "harness_article_extract", "harness_article_narrative",
+    ]
+
+
 def test_synthesize_falls_back_to_timeline_on_garbage(tmp_path):
     workspace, run_dir, run = _article_fixture(tmp_path)
     llm = ArticleLLM(["not json"] * 5)

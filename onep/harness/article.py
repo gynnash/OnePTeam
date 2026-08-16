@@ -229,9 +229,13 @@ class ArticleSynthesizer:
     def _extract_insights(
         self,
         inputs: dict[str, Any],
+        events: list[dict[str, Any]],
+        clusters: list[dict[str, Any]],
         graph: dict[str, Any],
         tracker=None,
     ) -> list[dict[str, Any]]:
+        if not events and not clusters and not graph.get("nodes") and not graph.get("edges"):
+            return []
         data = self._invoke(
             "harness_article_insight",
             INSIGHT_PROMPT.format(
@@ -323,7 +327,8 @@ class ArticleSynthesizer:
         events = self._extract_events(inputs, tracker)
         clusters = self._cluster_problems(events, tracker)
         graph = self._decision_graph(clusters, events, tracker)
-        insights = self._extract_insights(inputs, graph, tracker)
+        insights = self._extract_insights(
+            inputs, events, clusters, graph, tracker)
         narrative = self._narrative(inputs, graph, insights, tracker)
         if not narrative:
             narrative = self._fallback_narrative(inputs)

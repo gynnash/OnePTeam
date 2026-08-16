@@ -37,7 +37,7 @@ def global_vault_root() -> Path:
         root = str((raw.get("knowledge") or {}).get("vault_root") or "").strip()
         if root:
             return Path(root).expanduser()
-    except (OSError, yaml.YAMLError):
+    except (OSError, yaml.YAMLError, AttributeError, TypeError):
         pass
     return Path.home() / ".onep" / "vault"
 
