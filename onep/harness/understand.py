@@ -13,6 +13,31 @@ class HarnessUnsupportedMode(RuntimeError):
     """The harness does not yet route this workspace mode through the loop."""
 
 
+# Documentation files are not source code: a docs-only workspace has no
+# code to optimize and routes as greenfield.
+_DOCUMENTATION_EXTENSIONS = {".md", ".markdown", ".rst", ".txt"}
+
+
+def detect_mode(workspace: Path, requirement: str) -> str:
+    """Adaptive UNDERSTAND routing: greenfield | brownfield | mixed.
+
+    A workspace with no source files is greenfield regardless of
+    requirement. Existing code + a requirement is mixed (the greenfield
+    loop's repository summary feeds the gap analysis); existing code with
+    no requirement is brownfield (pure optimization).
+    """
+    from onep.strategy.scanner import walk_files
+    has_code = any(
+        path.suffix.lower() not in _DOCUMENTATION_EXTENSIONS
+        for path in walk_files(Path(workspace))
+    )
+    if not has_code:
+        return "greenfield"
+    if requirement.strip():
+        return "mixed"
+    return "brownfield"
+
+
 class UnderstandStage:
     """Produce the acceptance contract for a greenfield goal via the kernel."""
 
