@@ -560,6 +560,20 @@ class HarnessEngine:
 
         run_dir = workspace / ".onep" / "optimize" / "runs" / run.id
         tracker = CostTracker(run.options.max_cost)
+        from onep.strategy.optimize_models import RunRecord, RunStatus
+        from onep.strategy.optimize_recorder import OptimizeRunRecorder
+        run_record = RunRecord(
+            id=run.id,
+            project_name=run.project_name,
+            source_path=workspace,
+            status=RunStatus.RUNNING,
+            budget=run.options.max_cost,
+        )
+        optimize_recorder = OptimizeRunRecorder(run_dir, run_record)
+        optimize_recorder.record_event("harness_run_started", {
+            "mode": run.mode,
+            "workspace": str(workspace),
+        })
         commands = list(run.options.test_commands) or list(
             discover_required_test_commands(workspace)
         )
@@ -606,11 +620,14 @@ class HarnessEngine:
                 flow.transition(HarnessStage.STOP, {
                     "reason": StopReason.GOALS_SATISFIED.value,
                 })
-                self._complete_brownfield(project, run, tracker)
+                self._complete_brownfield(
+                    project, run, tracker, optimize_recorder
+                )
                 return True
 
             build = BrownfieldBuildStage(
-                workspace, run_dir, run.id, self.llm, tracker=tracker,
+                workspace, run_dir, run.id, self.llm,
+                tracker=tracker, recorder=optimize_recorder,
             )
             while True:
                 run.iteration += 1
@@ -665,6 +682,11 @@ class HarnessEngine:
                     raise RuntimeError(
                         "brownfield hard gates unsatisfied after build round"
                     )
+                optimize_recorder.record_event("round_end", {
+                    "iteration": run.iteration,
+                    "integration_passed": result["integration_passed"],
+                    "items": [item.to_dict() for item in run.work_items],
+                })
 
                 flow.transition(HarnessStage.DISCOVER)
                 candidates = BrainstormStage(
@@ -742,7 +764,9 @@ class HarnessEngine:
                 flow.transition(HarnessStage.DESIGN, {"incremental": True})
                 save_harness_run(run)
 
-            self._complete_brownfield(project, run, tracker)
+            self._complete_brownfield(
+                project, run, tracker, optimize_recorder
+            )
             return True
         except Exception as exc:
             run.status = "failed"
@@ -755,11 +779,19 @@ class HarnessEngine:
             self.console.print(f"[red]brownfield 运行失败: {exc}[/red]")
             return False
 
-    def _complete_brownfield(self, project, run, tracker) -> None:
+    def _complete_brownfield(
+        self, project, run, tracker, optimize_recorder=None,
+    ) -> None:
         run.stage = "stop"
         run.status = "completed"
         run.ended_at = datetime.now(timezone.utc).isoformat()
         run.spent = tracker.spent
+        if optimize_recorder is not None:
+            optimize_recorder.record_event("harness_run_completed", {
+                "status": run.status,
+                "stop_reason": run.stop_state.get("reason", ""),
+                "iteration": run.iteration,
+            })
         save_harness_run(run)
         project.status = ProjectStatus.COMPLETED
         project.current_stage = ""

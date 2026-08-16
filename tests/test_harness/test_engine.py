@@ -839,3 +839,65 @@ def test_harness_distills_events_into_project_vault(tmp_path, monkeypatch):
     decision_notes = list((knowledge_dir / "Decisions").glob("*.md"))
     assert decision_notes
     assert "type: decision" in decision_notes[0].read_text()
+
+
+def test_harness_brownfield_records_per_candidate_events(tmp_path, monkeypatch):
+    from onep.strategy.models import StrategyItem
+    from onep.harness.knowledge_models import load_run_events
+
+    repo = _repo(tmp_path)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+    (tmp_path / "app.py").write_text("value = 1\n")
+    repo.index.add(["pyproject.toml", "app.py"])
+    repo.index.commit("baseline")
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    monkeypatch.setattr(
+        "onep.harness.engine.analyze_source",
+        lambda source, llm, tracker=None, project_name="", source_files=None,
+        **kwargs: [StrategyItem(
+            id="si-1", title="Cache", file_location="app.py:1",
+            summary="cache issue", tags=["cache"], impact="medium",
+        )],
+    )
+    monkeypatch.setattr(
+        "onep.harness.engine.generate_optimize_plan",
+        lambda item, workspace, llm_adapter, plan_index=1, memory_context="":
+        SimpleNamespace(
+            plan_path=str(Path(workspace) / "plans" / "plan-1.md"),
+            plan_markdown="# plan 1",
+            expected_files=("app.py",),
+            dependencies=(),
+            test_commands=("pytest -q",),
+            risk_flags=(),
+        ),
+    )
+    monkeypatch.setattr(
+        "onep.harness.brownfield.GitRunSession", BrownfieldSession)
+    received = []
+
+    class RecordingCoordinator(BrownfieldCoordinator):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            received.append(kwargs.get("recorder"))
+
+    monkeypatch.setattr(
+        "onep.harness.brownfield.OptimizeCoordinator", RecordingCoordinator)
+
+    engine = HarnessEngine(
+        llm=BrownfieldFakeLLM(), vault_root=tmp_path / "vault")
+    assert engine.run(
+        _brownfield_project(tmp_path),
+        GreenfieldOptions(
+            max_rounds=4, test_commands=["pytest -q"], deploy_mode="none",
+        ),
+    ) is True
+
+    assert received and received[0] is not None
+    run = load_harness_run(tmp_path)
+    run_dir = tmp_path / ".onep" / "optimize" / "runs" / run.id
+    assert (run_dir / "run.yaml").exists()
+    event_types = [event["type"] for event in load_run_events(run_dir)]
+    assert "harness_run_started" in event_types
+    assert "round_end" in event_types
+    assert "harness_run_completed" in event_types
