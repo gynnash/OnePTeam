@@ -193,3 +193,25 @@ def test_harness_run_v1_yaml_defaults():
     })
     assert restored.research_reports == []
     assert restored.work_item_plans == {}
+
+
+def test_harness_run_round_trip_with_knowledge_events():
+    run = HarnessRun(
+        id="h-1", project_name="demo", workspace="/tmp",
+        mode="greenfield", original_goal="build value",
+        knowledge_events=[{
+            "type": "decision", "iteration": 1, "problem": "how to wire",
+            "selected": "flat", "generalizable": False,
+        }],
+    )
+    restored = HarnessRun.from_dict(run.to_dict())
+    assert restored.knowledge_events[0]["type"] == "decision"
+    assert restored.knowledge_events[0]["selected"] == "flat"
+
+
+def test_harness_run_v3_yaml_defaults():
+    restored = HarnessRun.from_dict({
+        "id": "h-1", "project_name": "demo", "workspace": "/tmp",
+        "mode": "greenfield", "original_goal": "",
+    })
+    assert restored.knowledge_events == []

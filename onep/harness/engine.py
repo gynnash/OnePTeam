@@ -22,8 +22,13 @@ from onep.greenfield.models import (
 from onep.greenfield.recorder import GreenfieldRecorder
 from onep.harness.design import DesignStage
 from onep.harness.discover import BrainstormStage, PrioritizeStage
+from onep.harness.distiller import KnowledgeDistiller
+from onep.harness.knowledge_models import (
+    load_run_events, save_distillations,
+)
 from onep.harness.research import ResearchStage
 from onep.harness.scorer import OpportunityScorer
+from onep.harness.vault import VaultWriter, global_vault_root
 from onep.harness.models import (
     CandidateAdapter,
     HarnessOptions,
@@ -60,13 +65,25 @@ from onep.strategy.planner import generate_optimize_plan
 class HarnessEngine:
     """Top-level orchestrator: Product Loop around the Execution Kernel."""
 
-    def __init__(self, console: Console | None = None, llm=None):
+    def __init__(
+        self,
+        console: Console | None = None,
+        llm=None,
+        vault_root: Path | None = None,
+    ):
         self.console = console or Console()
         self.llm = llm or LLMAdapter()
+        self.vault_root = (
+            Path(vault_root).resolve()
+            if vault_root is not None
+            else global_vault_root()
+        )
         self.kernel = GreenfieldEngine(self.console, self.llm)
         self.research = ResearchStage(self.llm, track=self.kernel._track)
         self.design = DesignStage(self.llm, track=self.kernel._track)
         self.scorer = OpportunityScorer(self.llm, track=self.kernel._track)
+        self.knowledge = KnowledgeDistiller(self.llm, track=self.kernel._track)
+        self.writer = VaultWriter(self.vault_root)
 
     def run(
         self,
@@ -123,6 +140,69 @@ class HarnessEngine:
         run_dir = workspace / ".onep" / "greenfield" / "runs" / gf_run.id
         recorder = GreenfieldRecorder(run_dir, gf_run, self.console)
         tracker = CostTracker(run.options.max_cost)
+        self.writer.project_root = (
+            workspace / ".onep" / "knowledge"
+        ).resolve()
+
+        def distill_checkpoint(checkpoint: str, payload: dict) -> None:
+            if checkpoint == "round_end":
+                raw = KnowledgeDistiller.collapse_repair_loops(
+                    load_run_events(run_dir)
+                )
+                payload = dict(payload)
+                payload["slices"] = [
+                    {
+                        "id": plan.id,
+                        "title": plan.title,
+                        "status": plan.status,
+                        "attempts": plan.attempts,
+                    }
+                    for plan in (gf_run.slices if gf_run else [])
+                ]
+            else:
+                raw = [payload]
+            events = self.knowledge.distill(
+                raw,
+                checkpoint,
+                run.iteration,
+                context=(
+                    f"project: {run.project_name}\n"
+                    f"goal: {run.original_goal or '(none)'}"
+                ),
+                tracker=tracker,
+            )
+            if not events:
+                return
+            run.knowledge_events.extend(
+                event.to_dict() for event in events
+            )
+            save_distillations(run_dir, events)
+            for event in events:
+                related = [
+                    VaultWriter.event_note_slug(other.to_dict())
+                    for other in events
+                    if other is not event
+                ]
+                self.writer.write_event_note(
+                    event.to_dict(),
+                    run.project_name,
+                    run.iteration,
+                    related=related,
+                )
+            architecture = ""
+            if gf_run is not None:
+                architecture = str(
+                    (self.kernel._load_architecture(run_dir) or {}).get(
+                        "selected", ""
+                    )
+                )
+            self.writer.write_project_moc(
+                run.project_name,
+                run.original_goal or "",
+                run.status,
+                run.knowledge_events,
+                architecture=architecture,
+            )
         session = None
         try:
             self.kernel._validate_budget_pricing(gf_run.options)
@@ -267,6 +347,7 @@ class HarnessEngine:
                 satisfied = self.kernel.build_pending_slices(
                     gf_run, contract, session, recorder, tracker,
                     respect_satisfied_early_exit=(run.iteration == 1),
+                    distill=distill_checkpoint,
                 )
                 run.spent = tracker.spent
                 run.work_items = [
@@ -285,6 +366,10 @@ class HarnessEngine:
                     raise RuntimeError(
                         "hard gates unsatisfied after all work items were built"
                     )
+                distill_checkpoint("round_end", {
+                    "iteration": run.iteration,
+                    "hard_gates_passed": satisfied,
+                })
 
                 flow.transition(HarnessStage.DISCOVER)
                 candidates = BrainstormStage(
@@ -408,7 +493,7 @@ class HarnessEngine:
             self.kernel._final_verify(
                 gf_run, contract, session, mandatory,
                 GreenfieldGateRunner(load_config().pipeline.test_timeout),
-                recorder, tracker,
+                recorder, tracker, distill=distill_checkpoint,
             )
             summary = self.kernel._write_completion_docs(
                 gf_run, contract, session.workspace, mandatory

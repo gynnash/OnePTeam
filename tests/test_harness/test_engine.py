@@ -788,3 +788,54 @@ def test_harness_in_loop_design_docs_are_committed(tmp_path, monkeypatch):
     assert run.stop_state["reason"] == StopReason.USER_STOP.value
     # Pause/resume parity: the working tree must be clean after the run.
     assert not repo.is_dirty(untracked_files=True)
+
+
+class KnowledgeLLM(FakeLLM):
+    """P1/P2 loop plus a distiller that emits one decision event per call."""
+
+    def __init__(self):
+        super().__init__()
+        self.distill_calls = 0
+
+    def invoke(self, system_prompt, user_prompt, stage_name):
+        if stage_name == "harness_distiller":
+            self.distill_calls += 1
+            return ('{"events": [{"type": "decision", '
+                    '"problem": "how to structure the module", '
+                    '"options": ["flat", "nested"], "selected": "flat", '
+                    '"reason": "simpler imports", '
+                    '"evidence": "gate passed after attempt", '
+                    '"files": ["app.py"], "outcome": "accepted", '
+                    '"generalizable": true}]}')
+        return super().invoke(system_prompt, user_prompt, stage_name)
+
+
+def test_harness_distills_events_into_project_vault(tmp_path, monkeypatch):
+    _repo(tmp_path)
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    llm = KnowledgeLLM()
+    engine = HarnessEngine(llm=llm, vault_root=tmp_path / "global-vault")
+    engine.kernel.optimizer = WritingOptimizer()
+
+    assert engine.run(
+        _project(tmp_path),
+        GreenfieldOptions(
+            max_rounds=4, max_repairs_per_slice=2,
+            test_commands=["pytest -q"], deploy_mode="none",
+        ),
+    ) is True
+
+    run = load_harness_run(tmp_path)
+    assert run.knowledge_events
+    assert run.knowledge_events[0]["type"] == "decision"
+    assert llm.distill_calls >= 2
+    knowledge_dir = tmp_path / ".onep" / "knowledge"
+    moc = knowledge_dir / "Project.md"
+    assert moc.exists()
+    moc_text = moc.read_text()
+    assert "## Decisions" in moc_text
+    assert "[[how-to-structure-the-module]]" in moc_text
+    decision_notes = list((knowledge_dir / "Decisions").glob("*.md"))
+    assert decision_notes
+    assert "type: decision" in decision_notes[0].read_text()

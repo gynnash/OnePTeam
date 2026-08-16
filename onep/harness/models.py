@@ -252,6 +252,7 @@ class HarnessRun:
     stop_state: dict[str, Any] = field(default_factory=dict)
     research_reports: list[dict[str, Any]] = field(default_factory=list)
     work_item_plans: dict[str, str] = field(default_factory=dict)
+    knowledge_events: list[dict[str, Any]] = field(default_factory=list)
     iteration: int = 0
     spent: float = 0.0
     started_at: str = field(default_factory=_now)
@@ -272,6 +273,7 @@ class HarnessRun:
             "options": self.options.to_dict(),
             "research_reports": list(self.research_reports),
             "work_item_plans": dict(self.work_item_plans),
+            "knowledge_events": list(self.knowledge_events),
         }
 
     @classmethod
@@ -308,6 +310,9 @@ class HarnessRun:
                 str(key): str(value)
                 for key, value in (data.get("work_item_plans") or {}).items()
             },
+            knowledge_events=[
+                dict(e) for e in data.get("knowledge_events") or []
+            ],
             iteration=int(data.get("iteration") or 0),
             spent=float(data.get("spent") or 0.0),
             started_at=str(data.get("started_at") or _now()),
