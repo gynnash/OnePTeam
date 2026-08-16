@@ -7,10 +7,10 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from onep.web import runtime
 from onep.web.api.events import router as events_router
 from onep.web.api.knowledge import router as knowledge_router
 from onep.web.api.projects import router as projects_router
-from onep.web.runtime import web_config
 
 UI_DIST = Path(__file__).resolve().parent / "ui" / "dist"
 
@@ -43,7 +43,9 @@ def create_app() -> FastAPI:
 
 def run_server(host: str | None = None, port: int | None = None) -> None:
     import uvicorn
-    default_host, default_port = web_config()
+    # Resolved via the runtime module so tests can monkeypatch
+    # onep.web.runtime.web_config at call time.
+    default_host, default_port = runtime.web_config()
     resolved_host = host or default_host
     resolved_port = port or default_port
     print(f"OnePTeam web console: http://{resolved_host}:{resolved_port}")
