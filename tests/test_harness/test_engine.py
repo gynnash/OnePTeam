@@ -407,3 +407,73 @@ def test_harness_resume_runs_sanitize_and_design_docs(tmp_path, monkeypatch):
     # the plan-consistency steps.
     assert engine.run(_project(tmp_path), options) is True
     assert calls == ["sanitize", "design"]
+
+
+class ResearchLLM(FakeLLM):
+    """P1 loop plus a full research stage producing evidence."""
+
+    def invoke(self, system_prompt, user_prompt, stage_name):
+        if stage_name == "harness_researcher":
+            return ('{"questions": ["cli patterns"]}'
+                    if "questions" in system_prompt or "Produce focused" in system_prompt
+                    else '{"cards": [{"repo": "cli/repo", "pattern": "builder", '
+                         '"module_boundaries": ["parse"], "data_flow": "in->out", '
+                         '"evidence_files": ["src/parse.py"], '
+                         '"strengths": ["clean"], "weaknesses": ["slow"]}], '
+                         '"evidence": [{"claim": "builders win", '
+                         '"source_repos": ["cli/repo"], "detail": "fits"}], '
+                         '"tradeoffs": []}')
+        if stage_name == "harness_architect":
+            return ('{"architecture": {"selected": "builder-with-citations", '
+                    '"rationale": "evidence"}, "evidence_citations": ['
+                    '{"claim": "builders win", "source_repo": "cli/repo", '
+                    '"detail": "adopt"}]}')
+        return super().invoke(system_prompt, user_prompt, stage_name)
+
+
+class StubClient:
+    def __init__(self):
+        self.searches = []
+
+    def search_repos(self, query, max_results=10):
+        self.searches.append(query)
+        from onep.harness.github_client import RepoInfo
+        return [RepoInfo(full_name="cli/repo", stargazers_count=900,
+                         pushed_at="2026-06-01T00:00:00Z")]
+
+    def filter_repos(self, repos, max_repos=3, min_stars=100, max_age_days=730):
+        return repos[:max_repos]
+
+    def fetch_readme(self, full_name, max_chars=8000):
+        return "# cli repo\n"
+
+    def fetch_top_tree(self, full_name, max_entries=30):
+        return ["src", "README.md"]
+
+
+def test_harness_research_evidence_reaches_architecture_doc(tmp_path, monkeypatch):
+    _repo(tmp_path)
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    llm = ResearchLLM()
+    client = StubClient()
+    engine = HarnessEngine(llm=llm)
+    engine.kernel.optimizer = WritingOptimizer()
+    monkeypatch.setattr(engine.research, "client", client)
+
+    success = engine.run(
+        _project(tmp_path),
+        GreenfieldOptions(
+            max_rounds=4, max_repairs_per_slice=2,
+            test_commands=["pytest -q"], deploy_mode="none",
+        ),
+    )
+    assert success is True
+    run = load_harness_run(tmp_path)
+    reports = run.research_reports
+    assert reports and reports[0]["mode"] == "full"
+    assert reports[0]["evidence"][0]["source_repos"] == ["cli/repo"]
+    architecture_md = (tmp_path / "docs" / "ARCHITECTURE.md").read_text()
+    assert "evidence_citations" in architecture_md
+    assert "cli/repo" in architecture_md
+    assert client.searches == ["cli patterns"]

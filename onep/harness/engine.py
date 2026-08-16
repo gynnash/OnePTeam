@@ -19,7 +19,10 @@ from onep.greenfield.models import (
     GreenfieldStatus,
 )
 from onep.greenfield.recorder import GreenfieldRecorder
+from onep.harness.design import DesignStage
 from onep.harness.discover import BrainstormStage, PrioritizeStage
+from onep.harness.research import ResearchStage
+from onep.harness.scorer import OpportunityScorer
 from onep.harness.models import (
     HarnessOptions,
     HarnessRun,
@@ -50,6 +53,9 @@ class HarnessEngine:
         self.console = console or Console()
         self.llm = llm or LLMAdapter()
         self.kernel = GreenfieldEngine(self.console, self.llm)
+        self.research = ResearchStage(self.llm, track=self.kernel._track)
+        self.design = DesignStage(self.llm, track=self.kernel._track)
+        self.scorer = OpportunityScorer(self.llm, track=self.kernel._track)
 
     def run(
         self,
@@ -139,12 +145,43 @@ class HarnessEngine:
                     session.repo.index.commit(
                         "docs: record acceptance and architecture baseline"
                     )
+                research = self.research.run(
+                    goal=run.original_goal,
+                    acceptance_summary=self._acceptance_summary(contract),
+                    architecture_summary=self._architecture_summary(run_dir),
+                    iteration=1,
+                    run_dir=run_dir,
+                    tracker=tracker,
+                    mode="auto",
+                )
+                run.research_reports.append(research.to_dict())
+                if research.mode == "skipped":
+                    recorder.trace(
+                        "RESEARCH",
+                        f"跳过研究: {research.skip_reason}", "yellow",
+                    )
                 flow.transition(HarnessStage.RESEARCH, {
-                    "skipped": True,
-                    "reason": "research stage arrives in P2",
+                    "mode": research.mode,
+                    "skip_reason": research.skip_reason,
                 })
+                architecture = self.kernel._load_architecture(run_dir)
+                architecture, warnings = self.design.run(
+                    research,
+                    self._acceptance_summary(contract),
+                    architecture,
+                    1,
+                    tracker,
+                )
+                for warning in warnings:
+                    recorder.trace(
+                        "DESIGN", f"无效引用已剔除: {warning}", "yellow"
+                    )
+                if research.has_evidence and architecture.get(
+                    "evidence_citations"
+                ):
+                    recorder.architecture_decision(architecture)
                 flow.transition(HarnessStage.DESIGN, {
-                    "architecture": self.kernel._load_architecture(run_dir),
+                    "architecture": architecture,
                 })
                 self.kernel._sanitize_generated_commands(
                     gf_run, contract, recorder
@@ -153,8 +190,7 @@ class HarnessEngine:
                     gf_run, contract, recorder
                 )
                 self.kernel._write_design_docs(
-                    workspace, gf_run, contract,
-                    self.kernel._load_architecture(run_dir),
+                    workspace, gf_run, contract, architecture,
                 )
                 self.kernel._commit_design_docs(session)
             else:
@@ -223,7 +259,10 @@ class HarnessEngine:
 
                 flow.transition(HarnessStage.REFLECT)
                 snapshot = ReflectStage().run(
-                    gf_run, contract, satisfied, run.iteration
+                    gf_run, contract, satisfied, run.iteration,
+                    llm=self.llm,
+                    tracker=tracker,
+                    track=self.kernel._track,
                 )
                 run.quality_history.append(snapshot)
                 if not satisfied:
@@ -243,17 +282,27 @@ class HarnessEngine:
                 )
 
                 flow.transition(HarnessStage.PRIORITIZE)
-                backlog, parked = PrioritizeStage().run(
+                scored = self.scorer.score_candidates(
                     candidates,
-                    integrated_fingerprints=self._integrated_fingerprints(run),
+                    run.original_goal,
+                    self._acceptance_summary(contract),
+                    run.iteration,
+                    tracker,
                 )
+                backlog, parked = PrioritizeStage().run(
+                    scored,
+                    integrated_fingerprints=self._integrated_fingerprints(run),
+                    use_scores=True,
+                )
+                decision = evaluate_stop(run, snapshot, backlog, scored=scored)
                 run.improvement_candidates = [
                     *[c for c in run.improvement_candidates
-                       if c.status not in {"parked", "duplicate"}],
+                       if c.status not in {
+                           "parked", "duplicate", "rejected", "regression",
+                       }],
                     *backlog,
                     *parked,
                 ]
-                decision = evaluate_stop(run, snapshot, backlog)
                 save_harness_run(run)
                 if decision.stop:
                     run.stop_state = {
@@ -273,10 +322,36 @@ class HarnessEngine:
                         )
                     )
                     recorder.save_slice(gf_run.slices[-1])
+                research = self.research.run(
+                    goal=run.original_goal,
+                    acceptance_summary=self._acceptance_summary(contract),
+                    architecture_summary=self._architecture_summary(run_dir),
+                    iteration=run.iteration,
+                    run_dir=run_dir,
+                    tracker=tracker,
+                    mode="lightweight",
+                )
+                run.research_reports.append(research.to_dict())
                 flow.transition(HarnessStage.RESEARCH, {
-                    "skipped": True,
-                    "reason": "research stage arrives in P2",
+                    "mode": research.mode,
+                    "skip_reason": research.skip_reason,
                 })
+                if research.has_evidence:
+                    architecture, warnings = self.design.run(
+                        research,
+                        self._acceptance_summary(contract),
+                        self.kernel._load_architecture(run_dir),
+                        run.iteration,
+                        tracker,
+                    )
+                    for warning in warnings:
+                        recorder.trace(
+                            "DESIGN", f"无效引用已剔除: {warning}", "yellow"
+                        )
+                    recorder.architecture_decision(architecture)
+                    self.kernel._write_design_docs(
+                        workspace, gf_run, contract, architecture
+                    )
                 flow.transition(HarnessStage.DESIGN, {"incremental": True})
                 save_harness_run(run)
 
@@ -370,6 +445,13 @@ class HarnessEngine:
             f"- {item.id} [{item.priority}] {item.behavior} ({item.status})"
             for item in contract.items
         )
+
+    @staticmethod
+    def _architecture_summary(run_dir: Path) -> str:
+        import json
+        from onep.greenfield.engine import GreenfieldEngine
+        architecture = GreenfieldEngine._load_architecture(run_dir)
+        return json.dumps(architecture, ensure_ascii=False, indent=2)
 
     @staticmethod
     def _adopt_legacy_run(workspace: Path) -> GreenfieldRun | None:
