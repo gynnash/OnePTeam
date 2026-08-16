@@ -14,13 +14,16 @@ from rich.console import Console
 
 from onep.config import load_config
 from onep.llm.adapters import LLMAdapter
-from onep.llm.cost import CostTracker, estimate_call_cost
+from onep.llm.cost import CostTracker
 from onep.llm.router import resolve_model
 from onep.persistence.database import init_db, insert_project
 from onep.persistence.models import Project, ProjectMode
-from onep.strategy.analyzer import parse_analysis_response
+from onep.strategy.analyze_pipeline import (
+    analyze_source, budgeted_invoke, candidate_from_item, record_usage,
+    reservation_for,
+)
 from onep.strategy.git_session import GitRunSession
-from onep.strategy.models import StrategyItem, classify_impact
+from onep.strategy.models import classify_impact
 from onep.strategy.optimize_coordinator import OptimizeCoordinator
 from onep.strategy.optimize_engine import OptimizeEngine
 from onep.strategy.optimize_models import (
@@ -37,10 +40,6 @@ from onep.strategy.repo_map import RepoMapIndex
 from onep.strategy.optimize_flow import OptimizeFlow, OptimizeFlowStage
 from onep.strategy.gates import discover_required_test_commands
 from onep.strategy.reviewer import ReviewAgent
-from onep.strategy.scanner import (
-    aggregate_chunk_results, aggregate_file_results, batch_files,
-    build_content_batches, get_strategy_files, parse_scan_response, walk_files,
-)
 from onep.strategy.test_runner import PlanTestRunner
 
 console = Console()
@@ -161,8 +160,11 @@ def optimize_cmd(
                 analysis_files = repo_map.paths(analysis_source, affected)
                 context = build_project_context(str(analysis_source), workspace)
                 context = context + "\n\n" + repo_map.render(affected)
-            items = _analyze(
-                analysis_source, llm, tracker, name, analysis_files
+            items = analyze_source(
+                analysis_source, llm, tracker, name, analysis_files,
+                budgeted=lambda stage_name, **kw: budgeted_invoke(
+                    llm, tracker, stage_name, **kw),
+                memory_context=_memory_context,
             )
             flow.transition(
                 OptimizeFlowStage.PLAN, {"items": len(items)}
@@ -173,7 +175,7 @@ def optimize_cmd(
                     item.title, item.summary, item.tags, item.impact
                 )
                 if item.impact not in auto_levels:
-                    skipped = _candidate(item, commands)
+                    skipped = candidate_from_item(item, commands)
                     plan_record = PlanRecord(skipped, status=PlanStatus.SKIPPED)
                     run.plans.append(plan_record)
                     recorder.save_plan(plan_record, "")
@@ -186,7 +188,7 @@ def optimize_cmd(
                 plan_memory = _memory_context(
                     "strategy_architect", name, item.title, item.id
                 )
-                reservation = _reservation_for(
+                reservation = reservation_for(
                     "strategy_architect",
                     item.title + item.summary + plan_memory,
                 )
@@ -206,17 +208,17 @@ def optimize_cmd(
                         memory_context=plan_memory,
                     )
                 except Exception as exc:
-                    failed_candidate = _candidate(item, commands)
-                    failed_candidate.discovery_index = index
-                    failed = PlanRecord(failed_candidate)
+                    failed_item = candidate_from_item(item, commands)
+                    failed_item.discovery_index = index
+                    failed = PlanRecord(failed_item)
                     failed.fail(FailureReason.PLAN_GENERATION_FAILED, str(exc))
                     recorder.save_plan(failed, "")
                     run.plans.append(failed)
                     continue
                 finally:
                     tracker.release(reservation or 0.0)
-                    _record_usage(tracker, llm, "strategy_architect")
-                candidate = _candidate(item, commands, generated)
+                    record_usage(tracker, llm, "strategy_architect")
+                candidate = candidate_from_item(item, commands, generated)
                 candidate.discovery_index = index
                 candidates.append((candidate, generated.plan_markdown))
 
@@ -494,125 +496,6 @@ def optimize_cmd(
                 "error": str(cleanup_exc),
             })
             console.print(f"[yellow]Cleanup failed: {cleanup_exc}[/yellow]")
-
-
-def _candidate(item: StrategyItem, commands: tuple[str, ...], generated=None) -> PlanCandidate:
-    location = item.file_location.split(":", 1)[0].strip()
-    expected = set(generated.expected_files if generated else item.expected_files)
-    if location and location != "N/A":
-        expected.add(location)
-    return PlanCandidate(
-        id=item.id,
-        title=item.title,
-        summary=item.summary,
-        tags=set(item.tags),
-        impact=item.impact,
-        files={Path(path) for path in expected},
-        dependencies=set(generated.dependencies if generated else item.dependencies),
-        test_commands=commands,
-        focused_test_commands=(
-            generated.test_commands if generated else ()
-        ),
-        risk_flags=set(generated.risk_flags if generated else ()),
-    )
-
-
-def _analyze(
-    source: Path,
-    llm: LLMAdapter,
-    tracker: CostTracker | None = None,
-    project_name: str = "",
-    source_files: list[Path] | None = None,
-) -> list[StrategyItem]:
-    from onep.orchestrator.brownfield import ANALYZE_PROMPT, SCAN_PROMPT_FULL
-
-    scan_results = []
-    for files in batch_files(source_files or walk_files(source)):
-        content_batches = build_content_batches(source, files)
-        entries = [
-            entry for batch in content_batches for entry in batch.entries
-        ]
-        chunk_results = []
-        for content in content_batches:
-            try:
-                response = _budgeted_invoke(
-                    llm, tracker, "analyzer",
-                    system_prompt="You are the analyzer agent.",
-                    user_prompt=append_memory_context(
-                        SCAN_PROMPT_FULL.format(file_block=content.render()),
-                        _memory_context(
-                            "analyzer", project_name,
-                            "classify strategy files", "",
-                        ) if project_name else "",
-                    ),
-                )
-                parsed = parse_scan_response(response)
-            except Exception:
-                parsed = []
-            chunk_results.extend(aggregate_chunk_results(
-                list(content.entries), parsed
-            ))
-        scan_results.extend(aggregate_file_results(
-            [entry.relative_path for entry in entries], chunk_results
-        ))
-    strategy_files = get_strategy_files(scan_results)
-    if not strategy_files:
-        return []
-    response = _budgeted_invoke(
-        llm, tracker, "strategy_architect",
-        system_prompt="You are the strategy architect.",
-        user_prompt=append_memory_context(
-            ANALYZE_PROMPT.format(
-                file_list="\n".join(f"- {path}" for path in strategy_files),
-                source_root=str(source),
-            ),
-            _memory_context(
-                "strategy_architect", project_name,
-                "discover optimization opportunities", "",
-            ) if project_name else "",
-        ),
-    )
-    return parse_analysis_response(response)
-
-
-def _budgeted_invoke(
-    llm: LLMAdapter,
-    tracker: CostTracker | None,
-    stage: str,
-    **kwargs,
-) -> str:
-    reservation = _reservation_for(
-        stage, str(kwargs.get("user_prompt") or "")
-    )
-    if tracker and (
-        reservation is None and tracker.budget > 0
-        or reservation is not None and not tracker.reserve(reservation)
-    ):
-        raise RuntimeError(f"budget exhausted before {stage}")
-    try:
-        result = llm.invoke(stage_name=stage, **kwargs)
-    finally:
-        if tracker:
-            tracker.release(reservation or 0.0)
-    if tracker:
-        _record_usage(tracker, llm, stage)
-    return result
-
-
-def _reservation_for(stage: str, prompt: str) -> float | None:
-    config = load_config()
-    return estimate_call_cost(
-        resolve_model(stage)[0],
-        prompt,
-        getattr(config.pipeline, "stage_output_tokens", {}).get(stage, 4096),
-    )
-
-
-def _record_usage(
-    tracker: CostTracker, llm: LLMAdapter, stage: str
-) -> None:
-    if not llm.last_usage.is_empty:
-        tracker.record_usage(stage, resolve_model(stage)[0], llm.last_usage)
 
 
 def _flush_cost(recorder, tracker: CostTracker) -> None:
