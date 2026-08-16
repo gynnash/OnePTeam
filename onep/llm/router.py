@@ -16,7 +16,7 @@ class TaskComplexity(str, Enum):
 COMPLEX_STAGES = {
     "pm", "designer", "architect", "strategy_architect",
     "optimize_developer", "greenfield_engineer", "code_reviewer",
-    "harness_researcher", "harness_architect",
+    "harness_researcher", "harness_architect", "harness_distiller",
 }
 
 
