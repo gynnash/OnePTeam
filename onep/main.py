@@ -12,3 +12,7 @@ def cli():
 
 
 register_commands(cli)
+
+
+if __name__ == "__main__":
+    cli()
