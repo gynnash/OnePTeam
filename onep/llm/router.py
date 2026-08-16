@@ -18,6 +18,9 @@ COMPLEX_STAGES = {
     "optimize_developer", "greenfield_engineer", "code_reviewer",
     "harness_researcher", "harness_architect", "harness_distiller",
     "harness_cross_distiller",
+    "harness_article_extract", "harness_article_cluster",
+    "harness_article_graph", "harness_article_insight",
+    "harness_article_narrative",
 }
 
 
