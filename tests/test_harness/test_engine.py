@@ -960,3 +960,34 @@ def test_harness_brownfield_zero_items_records_completed_event(tmp_path, monkeyp
     run_dir = tmp_path / ".onep" / "optimize" / "runs" / run.id
     event_types = [event["type"] for event in load_run_events(run_dir)]
     assert "harness_run_completed" in event_types
+
+
+class KnowledgeLLMWithCross(KnowledgeLLM):
+    def invoke(self, system_prompt, user_prompt, stage_name):
+        if stage_name == "harness_cross_distiller":
+            return ('{"principles": [{"title": "Delay Abstraction", '
+                    '"summary": "Wait for the second consumer.", '
+                    '"tags": ["design"]}], "patterns": []}')
+        return super().invoke(system_prompt, user_prompt, stage_name)
+
+
+def test_harness_cross_distills_generalizable_insights(tmp_path, monkeypatch):
+    _repo(tmp_path)
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    engine = HarnessEngine(
+        llm=KnowledgeLLMWithCross(), vault_root=tmp_path / "global-vault")
+    engine.kernel.optimizer = WritingOptimizer()
+    assert engine.run(
+        _project(tmp_path),
+        GreenfieldOptions(
+            max_rounds=4, max_repairs_per_slice=2,
+            test_commands=["pytest -q"], deploy_mode="none",
+        ),
+    ) is True
+    principle = (tmp_path / "global-vault" / "Engineering"
+                 / "Principles" / "delay-abstraction.md")
+    assert principle.exists()
+    text = principle.read_text()
+    assert "type: principle" in text
+    assert "## Source" in text

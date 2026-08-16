@@ -20,6 +20,7 @@ from onep.greenfield.models import (
     GreenfieldStatus,
 )
 from onep.greenfield.recorder import GreenfieldRecorder
+from onep.harness.cross_project import CrossProjectDistiller
 from onep.harness.design import DesignStage
 from onep.harness.discover import BrainstormStage, PrioritizeStage
 from onep.harness.distiller import KnowledgeDistiller
@@ -511,6 +512,7 @@ class HarnessEngine:
             gf_run.status = GreenfieldStatus.COMPLETED
             gf_run.ended_at = datetime.now(timezone.utc).isoformat()
             gf_run.spent = tracker.spent
+            self._distill_at_completion(run, tracker)
             run.status = "completed"
             run.stage = "stop"
             run.ended_at = datetime.now(timezone.utc).isoformat()
@@ -800,6 +802,7 @@ class HarnessEngine:
     def _complete_brownfield(
         self, project, run, tracker, optimize_recorder=None,
     ) -> None:
+        self._distill_at_completion(run, tracker)
         run.stage = "stop"
         run.status = "completed"
         run.ended_at = datetime.now(timezone.utc).isoformat()
@@ -819,6 +822,20 @@ class HarnessEngine:
             f"[bold green]Brownfield 闭环完成[/bold green]\n"
             f"[green]Stop: {run.stop_state.get('reason')}[/green]\n"
             f"[dim]Iterations: {run.iteration}[/dim]"
+        )
+
+    def _distill_at_completion(self, run: HarnessRun, tracker) -> None:
+        generalizable = [
+            event for event in run.knowledge_events
+            if event.get("generalizable")
+        ]
+        if not generalizable:
+            return
+        cross = CrossProjectDistiller(
+            self.llm, self.writer, track=self.kernel._track
+        )
+        cross.run(
+            generalizable, run.project_name, run.original_goal, tracker
         )
 
     @staticmethod
