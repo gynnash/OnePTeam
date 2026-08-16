@@ -155,3 +155,50 @@ def test_track_callback_fires_after_run(tmp_path):
     stage.run("g", "", "", 1, tmp_path / "runs" / "r-1",
               tracker="the-tracker")
     assert tracked == [("the-tracker", "harness_researcher")]
+
+
+def test_full_mode_skips_with_readme_fetch_failed(tmp_path):
+    class FailingReadmeClient(FakeClient):
+        def fetch_readme(self, full_name, max_chars=8000):
+            self.readme_calls.append(full_name)
+            raise GitHubUnavailable("HTTP 404")
+
+    llm = ScriptedLLM('{"questions": ["cli orchestration patterns"]}', "", "")
+    client = FailingReadmeClient(
+        [RepoInfo(full_name="cli/repo", stargazers_count=900,
+                  pushed_at="2026-06-01T00:00:00Z")], {})
+    report = _stage(llm, client=client).run(
+        "g", "", "", 1, tmp_path / "runs" / "r-1")
+    assert report.mode == "skipped"
+    assert report.skip_reason == "readme_fetch_failed"
+
+
+def test_lightweight_evidence_strips_invented_source_repos(tmp_path):
+    llm = ScriptedLLM(SYNTHESIS, "", "")
+    report = _stage(llm, client=FakeClient([], {})).run(
+        "g", "", "selected: python", 2, tmp_path / "runs" / "r-1",
+        mode="lightweight",
+    )
+    assert report.evidence[0].source_repos == []
+
+
+def test_full_mode_evidence_filters_invented_source_repos(tmp_path):
+    client = FakeClient(
+        [RepoInfo(full_name="cli/repo", stargazers_count=900,
+                  pushed_at="2026-06-01T00:00:00Z")],
+        {"cli/repo": "# great cli\n"},
+    )
+    synthesis = ('{"evidence": [{"claim": "builders win", '
+                 '"source_repos": ["cli/repo", "ghost/repo"], '
+                 '"detail": "scale fits"}], '
+                 '"tradeoffs": [{"option": "builder", "decision": "adopt", '
+                 '"reason": "fits", "source_repos": ["cli/repo"]}]}')
+    llm = ScriptedLLM(
+        '{"questions": ["cli orchestration patterns"]}', CARDS, synthesis)
+    report = _stage(llm, client=client).run(
+        goal="build a CLI", acceptance_summary="- REQ-1 ok",
+        architecture_summary="selected: python", iteration=1,
+        run_dir=tmp_path / "runs" / "r-1",
+    )
+    assert report.mode == "full"
+    assert report.evidence[0].source_repos == ["cli/repo"]

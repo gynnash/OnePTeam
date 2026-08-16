@@ -165,6 +165,10 @@ class ResearchStage:
                 mode="skipped", skip_reason="no_matching_repositories"
             )
         cards = self._extract_cards(questions, repos)
+        if cards is None:
+            return ResearchReport(
+                mode="skipped", skip_reason="readme_fetch_failed"
+            )
         if not cards:
             return ResearchReport(
                 mode="skipped", skip_reason="no_architecture_cards"
@@ -178,10 +182,14 @@ class ResearchStage:
             stage_name="harness_researcher",
         )
         data = _json_object(synthesis or "")
+        researched = {card.repo.lower() for card in cards if card.repo}
         evidence = [
             EvidenceCard(
                 claim=str(entry.get("claim") or ""),
-                source_repos=_str_list(entry.get("source_repos")),
+                source_repos=[
+                    repo for repo in _str_list(entry.get("source_repos"))
+                    if repo.lower() in researched
+                ],
                 detail=str(entry.get("detail") or ""),
             )
             for entry in data.get("evidence") or []
@@ -202,7 +210,9 @@ class ResearchStage:
             tradeoffs=tradeoffs, mode="full",
         )
 
-    def _extract_cards(self, questions, repos) -> list[ArchitectureCard]:
+    def _extract_cards(
+        self, questions, repos
+    ) -> list[ArchitectureCard] | None:
         listings = []
         for repo in repos:
             try:
@@ -223,7 +233,7 @@ class ResearchStage:
                 "readme": readme,
             })
         if not listings:
-            return []
+            return None  # every README fetch failed
         output = self.llm.invoke(
             system_prompt=RESEARCH_SYSTEM,
             user_prompt=CARDS_PROMPT.format(repos=self._render_listings(listings)),
@@ -261,7 +271,7 @@ class ResearchStage:
         evidence = [
             EvidenceCard(
                 claim=str(entry.get("claim") or ""),
-                source_repos=_str_list(entry.get("source_repos")),
+                source_repos=[],  # lightweight mode researched no repos
                 detail=str(entry.get("detail") or ""),
             )
             for entry in data.get("evidence") or []
