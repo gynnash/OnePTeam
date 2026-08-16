@@ -50,7 +50,11 @@ def managed_root() -> Path:
 
 
 def workspace_for(name: str) -> Path:
-    return (managed_root() / name).resolve()
+    root = managed_root()
+    resolved = (root / name).resolve()
+    if not resolved.is_relative_to(root.resolve()):
+        raise ValueError(f"project name escapes the managed root: {name!r}")
+    return resolved
 
 
 def spawn_run(name: str, workspace: Path) -> dict[str, Any] | None:

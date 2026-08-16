@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from onep.persistence.models import Project, ProjectMode
@@ -35,6 +36,38 @@ def test_create_project_endpoint(tmp_path, monkeypatch):
     assert body["name"] == "cli-1"
     assert body["spawn"]["pid"] == 42
     assert spawned == {"name": "cli-1", "workspace": str(tmp_path / "ws-cli-1")}
+
+
+def test_create_project_rejects_traversal_names(tmp_path, monkeypatch):
+    client = TestClient(create_app())
+    for name in ["..", "../evil", "../../../../tmp/evil", "a/b", "bad name"]:
+        response = client.post("/api/projects", json={"requirement": "x", "name": name})
+        assert response.status_code == 400, (name, response.text)
+
+
+def test_workspace_for_rejects_names_escaping_managed_root(tmp_path, monkeypatch):
+    from onep.web import runtime
+    root = tmp_path / "managed" / "projects"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(runtime, "managed_root", lambda: root)
+    for name in ["..", "../evil", "../../../../tmp/evil"]:
+        with pytest.raises(ValueError):
+            runtime.workspace_for(name)
+    assert runtime.workspace_for("ok-name") == (root / "ok-name").resolve()
+
+
+def test_create_project_catches_workspace_escape_as_400(tmp_path, monkeypatch):
+    monkeypatch.setattr("onep.persistence.database._config_dir", lambda: tmp_path)
+
+    def _raise(name):
+        raise ValueError("escapes managed root")
+
+    monkeypatch.setattr("onep.web.runtime.workspace_for", _raise)
+    client = TestClient(create_app())
+    response = client.post("/api/projects",
+                           json={"requirement": "x", "name": "valid-name"})
+    assert response.status_code == 400
+    assert response.json()["detail"] == "escapes managed root"
 
 
 def test_create_project_requires_requirement(tmp_path, monkeypatch):

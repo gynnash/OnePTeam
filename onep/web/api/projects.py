@@ -1,6 +1,7 @@
 """REST endpoints for projects, runs, candidates, and article triggering."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -39,10 +40,15 @@ def projects_create(payload: dict):
     if not requirement:
         raise HTTPException(status_code=400, detail="requirement is required")
     name = str((payload or {}).get("name") or "").strip() or default_project_name(requirement)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name or ""):
+        raise HTTPException(status_code=400, detail="invalid project name")
     init_db()
     if any(project.name == name for project in list_projects()):
         raise HTTPException(status_code=409, detail=f"project already exists: {name}")
-    workspace = runtime.workspace_for(name)
+    try:
+        workspace = runtime.workspace_for(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     project = create_project(requirement, name=name, workspace=workspace,
                              options=GreenfieldOptions())
     return {
