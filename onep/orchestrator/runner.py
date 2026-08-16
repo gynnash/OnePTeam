@@ -23,6 +23,7 @@ from onep.memory.context import (
 )
 from onep.tools.git import GitTool
 from onep.orchestrator.greenfield import GREENFIELD_STAGES, STAGE_PROMPTS
+from onep.harness.engine import HarnessEngine
 
 console = Console()
 
@@ -49,8 +50,7 @@ def run_pipeline(
         options = GreenfieldOptions.from_dict(
             state.artifacts.get("greenfield_options")
         )
-    from onep.greenfield.engine import GreenfieldEngine
-    return GreenfieldEngine(console).run(project, options)
+    return HarnessEngine(console).run(project, options)
 
 
 def run_legacy_pipeline(project_name: str, start_from: Optional[str] = None) -> bool:

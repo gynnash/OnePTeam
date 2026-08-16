@@ -179,3 +179,37 @@ def test_harness_persists_options_on_first_run(tmp_path, monkeypatch):
     assert isinstance(run.options, HarnessOptions)
     assert run.options.max_rounds == 9
     assert run.greenfield_run is not None
+
+
+def test_run_pipeline_routes_through_harness(tmp_path, monkeypatch):
+    _repo(tmp_path)
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    monkeypatch.setattr(
+        "onep.orchestrator.runner.init_db", lambda: None
+    )
+    monkeypatch.setattr(
+        "onep.orchestrator.runner.list_projects",
+        lambda: [_project(tmp_path)],
+    )
+
+    calls = []
+
+    class _RecordingHarness:
+        def __init__(self, console=None):
+            self.console = console
+
+        def run(self, project, options=None):
+            calls.append((project.name, options))
+            return True
+
+    monkeypatch.setattr(
+        "onep.orchestrator.runner.HarnessEngine", _RecordingHarness
+    )
+    from onep.orchestrator.runner import run_pipeline
+    from onep.greenfield.models import GreenfieldOptions
+
+    options = GreenfieldOptions(test_commands=["pytest -q"])
+    assert run_pipeline("demo", options=options) is True
+    assert calls[0][0] == "demo"
+    assert calls[0][1] is options
