@@ -61,20 +61,25 @@ class CrossProjectDistiller:
         ]
         if not generalizable:
             return []
-        output = self.llm.invoke(
-            system_prompt=CROSS_SYSTEM,
-            user_prompt=CROSS_PROMPT.format(
-                project=project,
-                goal=goal or "(none)",
-                events=json.dumps(
-                    generalizable, ensure_ascii=False, indent=2
+        try:
+            output = self.llm.invoke(
+                system_prompt=CROSS_SYSTEM,
+                user_prompt=CROSS_PROMPT.format(
+                    project=project,
+                    goal=goal or "(none)",
+                    events=json.dumps(
+                        generalizable, ensure_ascii=False, indent=2
+                    ),
                 ),
-            ),
-            stage_name="harness_cross_distiller",
-        )
-        if self.track is not None and tracker is not None:
-            self.track(tracker, "harness_cross_distiller")
-        data = _json_object(output or "")
+                stage_name="harness_cross_distiller",
+            )
+            if self.track is not None and tracker is not None:
+                self.track(tracker, "harness_cross_distiller")
+            data = _json_object(output or "")
+        except Exception:
+            # Distillation is advisory: an LLM failure must never break the
+            # completion path or the run that triggered it.
+            return []
         written = []
         related = [
             f"[[{VaultWriter.event_note_slug(event)}]]"

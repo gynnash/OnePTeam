@@ -825,18 +825,26 @@ class HarnessEngine:
         )
 
     def _distill_at_completion(self, run: HarnessRun, tracker) -> None:
-        generalizable = [
-            event for event in run.knowledge_events
-            if event.get("generalizable")
-        ]
-        if not generalizable:
+        try:
+            generalizable = [
+                event for event in run.knowledge_events
+                if event.get("generalizable")
+            ]
+            if not generalizable:
+                return
+            cross = CrossProjectDistiller(
+                self.llm, self.writer, track=self.kernel._track
+            )
+            cross.run(
+                generalizable, run.project_name, run.original_goal, tracker
+            )
+        except Exception as exc:
+            # Completion distillation is advisory: an LLM/API failure must
+            # never mark a fully-passed run as failed.
+            self.console.print(
+                f"[yellow]跨项目知识蒸馏失败（不影响完成）: {exc}[/yellow]"
+            )
             return
-        cross = CrossProjectDistiller(
-            self.llm, self.writer, track=self.kernel._track
-        )
-        cross.run(
-            generalizable, run.project_name, run.original_goal, tracker
-        )
 
     @staticmethod
     def _synthesized_contract(items) -> AcceptanceContract:

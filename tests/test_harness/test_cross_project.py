@@ -50,3 +50,16 @@ def test_cross_distiller_degrades_on_garbage(tmp_path):
     llm = CrossLLM("not json")
     assert CrossProjectDistiller(llm, writer).run(
         [{"type": "insight", "generalizable": True}], "d", "") == []
+
+
+class RaisingCrossLLM:
+    def invoke(self, system_prompt, user_prompt, stage_name):
+        raise RuntimeError("cross boom")
+
+
+def test_cross_distiller_llm_failure_writes_nothing(tmp_path):
+    writer = VaultWriter(tmp_path / "global", tmp_path / "project")
+    distiller = CrossProjectDistiller(RaisingCrossLLM(), writer)
+    assert distiller.run(
+        [{"type": "insight", "generalizable": True}], "d", "") == []
+    assert not (tmp_path / "global" / "Engineering").exists()

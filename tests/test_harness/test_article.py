@@ -104,3 +104,32 @@ def test_synthesize_falls_back_to_timeline_on_garbage(tmp_path):
     assert "Timeline" in result["markdown"]
     assert "feat: core value" in result["markdown"]
     assert "goals_satisfied" in result["markdown"]
+
+
+class RaisingNarrativeLLM(ArticleLLM):
+    def invoke(self, system_prompt, user_prompt, stage_name):
+        if stage_name == "harness_article_narrative":
+            raise RuntimeError("narrative boom")
+        return super().invoke(system_prompt, user_prompt, stage_name)
+
+
+def test_synthesize_falls_back_when_narrative_llm_raises(tmp_path):
+    workspace, run_dir, run = _article_fixture(tmp_path)
+    llm = RaisingNarrativeLLM([
+        '{"events": [{"id": "e1", "type": "decision", '
+        '"problem": "how to wire", "selected": "flat", '
+        '"reason": "simpler", "iteration": 1}]}',
+        '{"clusters": [{"problem": "wiring", "event_ids": ["e1"], '
+        '"resolution": "flat"}]}',
+        '{"nodes": [], "edges": []}',
+        '{"insights": []}',
+        "unused",
+    ])
+    writer = VaultWriter(tmp_path / "global", tmp_path / "project")
+    result = ArticleSynthesizer(llm, writer).synthesize(
+        workspace, run_dir, run)
+    assert result["article_path"].exists()
+    text = result["article_path"].read_text()
+    assert "goals_satisfied" in text
+    assert "build value" in text
+    assert "## Timeline (evidence)" in result["markdown"]

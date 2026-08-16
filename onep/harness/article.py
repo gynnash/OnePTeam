@@ -151,11 +151,17 @@ class ArticleSynthesizer:
         }
 
     def _invoke(self, stage: str, prompt: str, tracker) -> dict:
-        output = self.llm.invoke(
-            system_prompt=ARTICLE_SYSTEM,
-            user_prompt=prompt,
-            stage_name=stage,
-        )
+        try:
+            output = self.llm.invoke(
+                system_prompt=ARTICLE_SYSTEM,
+                user_prompt=prompt,
+                stage_name=stage,
+            )
+        except Exception:
+            # Advisory: an LLM failure degrades to empty output, so the
+            # stage-level empty handling (and the deterministic narrative
+            # fallback) takes over instead of aborting synthesis.
+            return {}
         if self.track is not None and tracker is not None:
             self.track(tracker, stage)
         return _json_object(output or "")

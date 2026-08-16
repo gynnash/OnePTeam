@@ -991,3 +991,34 @@ def test_harness_cross_distills_generalizable_insights(tmp_path, monkeypatch):
     text = principle.read_text()
     assert "type: principle" in text
     assert "## Source" in text
+
+
+class FailingCrossDistiller:
+    def __init__(self, llm, writer, track=None):
+        pass
+
+    def run(self, events, project, goal, tracker=None):
+        raise RuntimeError("cross boom")
+
+
+def test_harness_cross_distill_failure_does_not_fail_run(tmp_path, monkeypatch):
+    """A raising cross-project distiller at completion must not fail a
+    fully-passed run: the completion distillation is advisory."""
+    _repo(tmp_path)
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    monkeypatch.setattr(
+        "onep.harness.engine.CrossProjectDistiller", FailingCrossDistiller)
+    engine = HarnessEngine(
+        llm=KnowledgeLLM(), vault_root=tmp_path / "global-vault")
+    engine.kernel.optimizer = WritingOptimizer()
+
+    assert engine.run(
+        _project(tmp_path),
+        GreenfieldOptions(
+            max_rounds=4, max_repairs_per_slice=2,
+            test_commands=["pytest -q"], deploy_mode="none",
+        ),
+    ) is True
+    run = load_harness_run(tmp_path)
+    assert run.status == "completed"
