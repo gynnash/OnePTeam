@@ -31,10 +31,15 @@ class ImprovementCandidate:
     description: str = ""
     source: str = "brainstorm"
     fingerprint: str = ""
-    status: str = "pending"  # pending | backlog | parked | duplicate | integrated
+    status: str = "pending"  # pending | backlog | parked | duplicate | integrated | rejected | regression
+    score: float | None = None
+    dimensions: dict[str, Any] = field(default_factory=dict)
+    evidence: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            **asdict(self),
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ImprovementCandidate":
@@ -45,6 +50,10 @@ class ImprovementCandidate:
             source=str(data.get("source") or "brainstorm"),
             fingerprint=str(data.get("fingerprint") or ""),
             status=str(data.get("status") or "pending"),
+            score=(float(data["score"]) if data.get("score") is not None
+                   else None),
+            dimensions=dict(data.get("dimensions") or {}),
+            evidence=str(data.get("evidence") or ""),
         )
 
 
@@ -159,6 +168,9 @@ class QualitySnapshot:
     goal_coverage: float
     quality_score: float
     hard_gates_passed: bool
+    architecture_quality: float = 0.0
+    blocker_count: int = 0
+    risks: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=_now)
 
     def to_dict(self) -> dict[str, Any]:
@@ -173,6 +185,10 @@ class QualitySnapshot:
             goal_coverage=float(data.get("goal_coverage") or 0.0),
             quality_score=float(data.get("quality_score") or 0.0),
             hard_gates_passed=bool(data.get("hard_gates_passed", False)),
+            architecture_quality=float(
+                data.get("architecture_quality") or 0.0),
+            blocker_count=int(data.get("blocker_count") or 0),
+            risks=list(data.get("risks") or []),
             created_at=str(data.get("created_at") or _now()),
         )
 
@@ -234,6 +250,8 @@ class HarnessRun:
     )
     quality_history: list[QualitySnapshot] = field(default_factory=list)
     stop_state: dict[str, Any] = field(default_factory=dict)
+    research_reports: list[dict[str, Any]] = field(default_factory=list)
+    work_item_plans: dict[str, str] = field(default_factory=dict)
     iteration: int = 0
     spent: float = 0.0
     started_at: str = field(default_factory=_now)
@@ -252,6 +270,8 @@ class HarnessRun:
                 item.to_dict() for item in self.quality_history
             ],
             "options": self.options.to_dict(),
+            "research_reports": list(self.research_reports),
+            "work_item_plans": dict(self.work_item_plans),
         }
 
     @classmethod
@@ -280,6 +300,14 @@ class HarnessRun:
                 for item in data.get("quality_history") or []
             ],
             stop_state=dict(data.get("stop_state") or {}),
+            research_reports=[
+                dict(entry) for entry in data.get("research_reports") or []
+                if isinstance(entry, dict)
+            ],
+            work_item_plans={
+                str(key): str(value)
+                for key, value in (data.get("work_item_plans") or {}).items()
+            },
             iteration=int(data.get("iteration") or 0),
             spent=float(data.get("spent") or 0.0),
             started_at=str(data.get("started_at") or _now()),

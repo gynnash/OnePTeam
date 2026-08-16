@@ -122,3 +122,74 @@ def test_stop_decision_defaults():
     assert decision.reason is None
     assert decision.evidence == {}
     assert StopReason.DIMINISHING_RETURNS.value == "diminishing_returns"
+
+
+from onep.harness.models import ImprovementCandidate, QualitySnapshot, HarnessRun
+
+
+def test_improvement_candidate_round_trip_with_score_fields():
+    candidate = ImprovementCandidate(
+        id="I-1", title="Add caching", description="cache reads",
+        score=0.82,
+        dimensions={"V": 0.9, "Q": 0.7, "R": 0.5, "E": 0.4, "C": 0.2,
+                    "Risk": 0.1, "rationale": "fast wins"},
+        evidence="acceptance REQ-3 wants faster reads",
+        status="backlog",
+    )
+    restored = ImprovementCandidate.from_dict(candidate.to_dict())
+    assert restored.score == 0.82
+    assert restored.dimensions["V"] == 0.9
+    assert restored.evidence.startswith("acceptance")
+    assert restored.status == "backlog"
+
+
+def test_improvement_candidate_defaults_for_v1_yaml():
+    restored = ImprovementCandidate.from_dict({"id": "I-1", "title": "T"})
+    assert restored.score is None
+    assert restored.dimensions == {}
+    assert restored.evidence == ""
+
+
+def test_quality_snapshot_round_trip_with_new_fields():
+    snapshot = QualitySnapshot(
+        iteration=2, acceptance_pass_rate=1.0, test_pass_rate=1.0,
+        goal_coverage=0.9, quality_score=0.88, hard_gates_passed=True,
+        architecture_quality=0.7, blocker_count=1, risks=["slow startup"],
+    )
+    restored = QualitySnapshot.from_dict(snapshot.to_dict())
+    assert restored.architecture_quality == 0.7
+    assert restored.blocker_count == 1
+    assert restored.risks == ["slow startup"]
+
+
+def test_quality_snapshot_v1_yaml_defaults():
+    restored = QualitySnapshot.from_dict({
+        "iteration": 1, "acceptance_pass_rate": 1.0, "test_pass_rate": 1.0,
+        "goal_coverage": 1.0, "quality_score": 1.0,
+        "hard_gates_passed": True,
+    })
+    assert restored.architecture_quality == 0.0
+    assert restored.blocker_count == 0
+    assert restored.risks == []
+
+
+def test_harness_run_round_trip_with_research_and_plans():
+    run = HarnessRun(
+        id="h-1", project_name="demo", workspace="/tmp",
+        mode="greenfield", original_goal="build value",
+        research_reports=[{"mode": "skipped", "skip_reason": "no repos"}],
+        work_item_plans={"item-1": "# plan text"},
+    )
+    restored = HarnessRun.from_dict(run.to_dict())
+    assert restored.research_reports == [{"mode": "skipped",
+                                          "skip_reason": "no repos"}]
+    assert restored.work_item_plans == {"item-1": "# plan text"}
+
+
+def test_harness_run_v1_yaml_defaults():
+    restored = HarnessRun.from_dict({
+        "id": "h-1", "project_name": "demo", "workspace": "/tmp",
+        "mode": "greenfield", "original_goal": "",
+    })
+    assert restored.research_reports == []
+    assert restored.work_item_plans == {}
