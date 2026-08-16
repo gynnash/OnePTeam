@@ -728,3 +728,63 @@ def test_harness_brownfield_parks_candidate_when_plan_generation_fails(tmp_path,
               if c.status == "parked"]
     assert [c.id for c in parked] == ["B-001"]
     assert not any(w.id == "iter1-1" for w in run.work_items)
+
+
+def test_harness_in_loop_design_docs_are_committed(tmp_path, monkeypatch):
+    """Evidence-bearing round >= 2 must not leave the tree dirty:
+    pause/resume requires a clean session (GreenfieldGitSession raises
+    ValueError on dirty tracked files)."""
+    from onep.greenfield.engine import DISCOVERY_PROMPT  # noqa: F401 (context)
+
+    stop_flag = tmp_path / ".onep" / "harness" / "stop_requested"
+
+    class IteratingResearchLLM(ResearchLLM):
+        def __init__(self):
+            super().__init__()
+            self.brainstorm_calls = 0
+            self.flagged = False
+
+        def invoke(self, system_prompt, user_prompt, stage_name):
+            if stage_name == "harness_brainstorm":
+                self.brainstorm_calls += 1
+                if self.brainstorm_calls == 1:
+                    return ('{"candidates": [{"id": "I-001", '
+                            '"title": "Add CLI", '
+                            '"description": "Expose VALUE via a CLI command", '
+                            '"evidence": "REQ-1 ok"}]}')
+                return '{"candidates": []}'
+            output = super().invoke(system_prompt, user_prompt, stage_name)
+            # Request a user stop right after the first evidence-bearing
+            # in-loop design round: the run pauses at the next PLAN with
+            # nothing left to sweep the design docs into a later commit.
+            if (
+                stage_name == "harness_researcher"
+                and self.brainstorm_calls >= 1
+                and not self.flagged
+            ):
+                self.flagged = True
+                stop_flag.parent.mkdir(parents=True, exist_ok=True)
+                stop_flag.touch()
+            return output
+
+    repo = _repo(tmp_path)
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    llm = IteratingResearchLLM()
+    engine = HarnessEngine(llm=llm)
+    engine.kernel.optimizer = WritingOptimizer()
+    monkeypatch.setattr(engine.research, "client", StubClient())
+
+    success = engine.run(
+        _project(tmp_path),
+        GreenfieldOptions(
+            max_rounds=4, max_repairs_per_slice=2,
+            test_commands=["pytest -q"], deploy_mode="none",
+        ),
+    )
+    assert success is True
+    run = load_harness_run(tmp_path)
+    assert run.iteration == 2
+    assert run.stop_state["reason"] == StopReason.USER_STOP.value
+    # Pause/resume parity: the working tree must be clean after the run.
+    assert not repo.is_dirty(untracked_files=True)

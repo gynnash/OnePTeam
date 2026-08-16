@@ -96,24 +96,34 @@ class OpportunityScorer:
         if not candidates:
             return []
         import json
-        output = self.llm.invoke(
-            system_prompt=SCORER_SYSTEM,
-            user_prompt=SCORER_PROMPT.format(
-                goal=goal or "(pure code optimization)",
-                acceptance=acceptance_summary or "(none)",
-                iteration=iteration,
-                candidates=json.dumps(
-                    [
-                        {"id": candidate.id, "title": candidate.title,
-                         "description": candidate.description,
-                         "evidence": candidate.evidence}
-                        for candidate in candidates
-                    ],
-                    ensure_ascii=False, indent=2,
+        try:
+            output = self.llm.invoke(
+                system_prompt=SCORER_SYSTEM,
+                user_prompt=SCORER_PROMPT.format(
+                    goal=goal or "(pure code optimization)",
+                    acceptance=acceptance_summary or "(none)",
+                    iteration=iteration,
+                    candidates=json.dumps(
+                        [
+                            {"id": candidate.id, "title": candidate.title,
+                             "description": candidate.description,
+                             "evidence": candidate.evidence}
+                            for candidate in candidates
+                        ],
+                        ensure_ascii=False, indent=2,
+                    ),
                 ),
-            ),
-            stage_name="harness_scorer",
-        )
+                stage_name="harness_scorer",
+            )
+        except Exception:
+            # Transient LLM failure must not fail the run: score every
+            # candidate with the default (nothing usable -> 0.80).
+            if self.track is not None and tracker is not None:
+                self.track(tracker, "harness_scorer")
+            for candidate in candidates:
+                candidate.score = DEFAULT_UNSCORED_SCORE
+                candidate.dimensions = {"rationale": "scorer unavailable"}
+            return candidates
         if self.track is not None and tracker is not None:
             self.track(tracker, "harness_scorer")
         data = _json_object(output or "")
@@ -131,6 +141,15 @@ class OpportunityScorer:
             if dims is None:
                 candidate.score = DEFAULT_UNSCORED_SCORE
                 candidate.dimensions = {"rationale": "scorer unavailable"}
+                continue
+            if not any(key in SCORE_WEIGHTS for key in dims):
+                # Matched id but no usable dimension scores (only id and/or
+                # rationale): keep the "nothing usable -> 0.80" promise
+                # instead of computing 0.0 and rejecting the candidate.
+                candidate.score = DEFAULT_UNSCORED_SCORE
+                candidate.dimensions = {
+                    "rationale": "scorer returned no dimensions",
+                }
                 continue
             candidate.dimensions = dims
             candidate.score = compute_score(dims)

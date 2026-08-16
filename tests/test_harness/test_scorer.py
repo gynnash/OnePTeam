@@ -105,3 +105,31 @@ def test_score_candidates_falls_back_for_unmatched_ids():
         _candidates(), "g", "", 1,
     )
     assert all(c.score == DEFAULT_UNSCORED_SCORE for c in scored)
+
+
+class ExplodingLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, system_prompt, user_prompt, stage_name):
+        self.calls += 1
+        raise RuntimeError("api down")
+
+
+def test_score_candidates_llm_failure_falls_back_to_default():
+    llm = ExplodingLLM()
+    scored = OpportunityScorer(llm).score_candidates(
+        _candidates(), "g", "", 1,
+    )
+    assert all(c.score == DEFAULT_UNSCORED_SCORE for c in scored)
+    assert all(c.dimensions == {"rationale": "scorer unavailable"}
+               for c in scored)
+    assert llm.calls == 1
+
+
+def test_score_candidates_empty_dims_treated_as_unscored():
+    llm = ScorerLLM('{"scores": [{"id": "I-1"}, {"id": "I-2"}]}')
+    scored = OpportunityScorer(llm).score_candidates(
+        _candidates(), "g", "", 1,
+    )
+    assert all(c.score == DEFAULT_UNSCORED_SCORE for c in scored)

@@ -44,7 +44,7 @@ from onep.harness.brownfield import (
 from onep.harness.reflect import ReflectStage, evaluate_stop
 from onep.harness.states import HarnessFlow, HarnessStage
 from onep.harness.understand import (
-    HarnessUnsupportedMode, UnderstandStage, detect_mode,
+    UnderstandStage, detect_mode,
 )
 from onep.llm.adapters import LLMAdapter
 from onep.llm.cost import CostTracker
@@ -99,6 +99,7 @@ class HarnessEngine:
             if detected == "greenfield":
                 # BROWNFIELD project with no code: treat as greenfield.
                 run.mode = "greenfield"
+                save_harness_run(run)
             else:
                 run.mode = detected
                 save_harness_run(run)
@@ -367,6 +368,13 @@ class HarnessEngine:
                     self.kernel._write_design_docs(
                         workspace, gf_run, contract, architecture
                     )
+                    # In-loop design docs carry evidence from this round;
+                    # commit them like the first-run and resume paths so a
+                    # pause/resume never meets a dirty tracked tree.
+                    # In-loop design docs carry evidence from this round;
+                    # commit them like the first-run and resume paths so a
+                    # pause/resume never meets a dirty tracked tree.
+                    self.kernel._commit_design_docs(session)
                 flow.transition(HarnessStage.DESIGN, {"incremental": True})
                 save_harness_run(run)
 
