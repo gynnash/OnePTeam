@@ -70,6 +70,24 @@ def test_create_project_catches_workspace_escape_as_400(tmp_path, monkeypatch):
     assert response.json()["detail"] == "escapes managed root"
 
 
+def test_create_project_accepts_unicode_name(tmp_path, monkeypatch):
+    monkeypatch.setattr("onep.persistence.database._config_dir", lambda: tmp_path)
+    monkeypatch.setattr("onep.web.runtime.workspace_for",
+                        lambda name: tmp_path / f"ws-{name}")
+    spawned = {}
+    monkeypatch.setattr("onep.web.runtime.spawn_run",
+                        lambda name, workspace: spawned.update(name=name, workspace=str(workspace)) or {"pid": 42, "started": True})
+    client = TestClient(create_app())
+    response = client.post("/api/projects",
+                           json={"requirement": "x", "name": "构建一个CLI工具"})
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["name"] == "构建一个CLI工具"
+    assert body["spawn"]["pid"] == 42
+    assert spawned == {"name": "构建一个CLI工具",
+                       "workspace": str(tmp_path / "ws-构建一个CLI工具")}
+
+
 def test_create_project_requires_requirement(tmp_path, monkeypatch):
     client = TestClient(create_app())
     response = client.post("/api/projects", json={"name": "x"})

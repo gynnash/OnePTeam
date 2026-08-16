@@ -40,7 +40,11 @@ def projects_create(payload: dict):
     if not requirement:
         raise HTTPException(status_code=400, detail="requirement is required")
     name = str((payload or {}).get("name") or "").strip() or default_project_name(requirement)
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name or ""):
+    # Match what default_project_name can emit: word chars (\w covers unicode
+    # letters incl. CJK, digits, underscore) plus dots/hyphens inside. Leading
+    # word-char requirement rejects ".." and any "/", space, or dot-leading
+    # traversal; re.UNICODE is the default in Python 3.
+    if not re.fullmatch(r"[\w][\w.\-]*", name or ""):
         raise HTTPException(status_code=400, detail="invalid project name")
     init_db()
     if any(project.name == name for project in list_projects()):
