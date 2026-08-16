@@ -42,8 +42,13 @@ def last_flow_stage(workspace: Path) -> str:
             if not line:
                 continue
             try:
-                payload = (json.loads(line) or {}).get("payload") or {}
+                raw = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(raw, dict):
+                continue
+            payload = raw.get("payload")
+            if not isinstance(payload, dict):
                 continue
             stage = str(payload.get("stage") or stage)
     return stage
@@ -63,7 +68,9 @@ def stage_history(workspace: Path) -> list[dict[str, Any]]:
                 continue
             if not isinstance(raw, dict):
                 continue
-            payload = raw.get("payload") or {}
+            payload = raw.get("payload")
+            if not isinstance(payload, dict):
+                continue
             entries.append({
                 "type": str(raw.get("type") or "flow_transition"),
                 "stage": str(payload.get("stage") or ""),

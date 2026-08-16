@@ -76,3 +76,25 @@ def test_log_entries_offset_and_limit(tmp_path, monkeypatch):
     assert entries[0]["type"] == "trace"
     assert entries[0]["payload"]["label"] == "SLICE"
     assert log_entries(tmp_path / "nope") == []
+
+
+def test_last_flow_stage_skips_non_dict_lines(tmp_path, monkeypatch):
+    workspace = seed_project(tmp_path, monkeypatch, name="demo")
+    flow_path = flow_events_path(workspace)
+    flow_path.write_text(
+        '"just a string"\n'
+        '42\n'
+        '{"type": "flow_transition", "payload": "oops"}\n'
+        '{"type": "flow_transition", "payload": {"stage": "build", "iteration": 2}}\n'
+    )
+    assert last_flow_stage(workspace) == "build"
+
+
+def test_stage_history_skips_non_dict_payloads(tmp_path, monkeypatch):
+    workspace = seed_project(tmp_path, monkeypatch, name="demo")
+    flow_events_path(workspace).write_text(
+        '{"type": "flow_transition", "payload": {"stage": "understand", "iteration": 1}}\n'
+        '{"type": "flow_transition", "payload": 42}\n'
+        '{"type": "flow_transition", "payload": {"stage": "stop", "iteration": 1}}\n'
+    )
+    assert [entry["stage"] for entry in stage_history(workspace)] == ["understand", "stop"]
