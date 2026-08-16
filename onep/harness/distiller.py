@@ -73,9 +73,15 @@ class KnowledgeDistiller:
         iteration: int,
         context: str = "",
         tracker=None,
+        collapse: bool = True,
     ) -> list[KnowledgeEvent]:
         if not raw_events:
             return []
+        rendered = (
+            self.collapse_repair_loops(raw_events)
+            if collapse
+            else raw_events
+        )
         output = self.llm.invoke(
             system_prompt=DISTILLER_SYSTEM,
             user_prompt=DISTILLER_PROMPT.format(
@@ -83,7 +89,7 @@ class KnowledgeDistiller:
                 iteration=iteration,
                 context=context or "(none)",
                 events=json.dumps(
-                    self.collapse_repair_loops(raw_events),
+                    rendered,
                     ensure_ascii=False,
                     indent=2,
                 ),

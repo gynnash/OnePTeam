@@ -901,3 +901,62 @@ def test_harness_brownfield_records_per_candidate_events(tmp_path, monkeypatch):
     assert "harness_run_started" in event_types
     assert "round_end" in event_types
     assert "harness_run_completed" in event_types
+
+
+class FailingDistillerLLM(FakeLLM):
+    """P1/P2 loop whose distiller stage always raises."""
+
+    def invoke(self, system_prompt, user_prompt, stage_name):
+        if stage_name == "harness_distiller":
+            raise RuntimeError("distill boom")
+        return super().invoke(system_prompt, user_prompt, stage_name)
+
+
+def test_harness_distill_failure_does_not_break_run(tmp_path, monkeypatch):
+    """A failing distiller must not break the build loop or finalize tail."""
+    _repo(tmp_path)
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    engine = HarnessEngine(llm=FailingDistillerLLM())
+    engine.kernel.optimizer = WritingOptimizer()
+
+    assert engine.run(
+        _project(tmp_path),
+        GreenfieldOptions(
+            max_rounds=4, max_repairs_per_slice=2,
+            test_commands=["pytest -q"], deploy_mode="none",
+        ),
+    ) is True
+
+    run = load_harness_run(tmp_path)
+    assert run.status == "completed"
+    assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
+    assert run.knowledge_events == []
+
+
+def test_harness_brownfield_zero_items_records_completed_event(tmp_path, monkeypatch):
+    """P2 empty-scan exit records a harness_run_completed event."""
+    from onep.harness.knowledge_models import load_run_events
+
+    repo = _repo(tmp_path)
+    (tmp_path / "app.py").write_text("x = 1\n")
+    repo.index.add(["app.py"])
+    repo.index.commit("source")
+
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    monkeypatch.setattr(
+        "onep.harness.engine.analyze_source", lambda *args, **kwargs: [])
+    engine = HarnessEngine(llm=BrownfieldFakeLLM())
+
+    assert engine.run(
+        _brownfield_project(tmp_path),
+        GreenfieldOptions(max_rounds=4, test_commands=["pytest -q"],
+                          deploy_mode="none"),
+    ) is True
+    run = load_harness_run(tmp_path)
+    assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
+    assert run.iteration == 0
+    run_dir = tmp_path / ".onep" / "optimize" / "runs" / run.id
+    event_types = [event["type"] for event in load_run_events(run_dir)]
+    assert "harness_run_completed" in event_types

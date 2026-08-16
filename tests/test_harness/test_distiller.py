@@ -93,3 +93,28 @@ def test_collapse_repair_loops_empty_and_noise():
     assert KnowledgeDistiller.collapse_repair_loops(
         [{"type": "trace", "payload": {"label": "STATE", "message": "x"}}]
     ) == []
+
+
+def test_distill_collapse_false_passes_structured_payload_verbatim():
+    llm = DistillLLM(EVENTS_PAYLOAD)
+    payload = [{"checkpoint": "review_complete", "slice_id": "core",
+                "review": "passed"}]
+    events = KnowledgeDistiller(llm).distill(
+        payload, "review_complete", 1, collapse=False,
+    )
+    assert [event.type for event in events] == ["failure", "insight"]
+    user_prompt = llm.calls[0][1]
+    assert "review_complete" in user_prompt
+    assert "core" in user_prompt
+    assert '"review": "passed"' in user_prompt
+
+
+def test_distill_collapse_true_renders_collapsed_groups():
+    llm = DistillLLM(EVENTS_PAYLOAD)
+    KnowledgeDistiller(llm).distill(
+        [{"checkpoint": "review_complete", "slice_id": "core",
+          "review": "passed"}],
+        "review_complete", 1,
+    )
+    user_prompt = llm.calls[0][1]
+    assert "Raw events (JSON):\n[]" in user_prompt

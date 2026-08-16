@@ -312,6 +312,7 @@ class HarnessRun:
             },
             knowledge_events=[
                 dict(e) for e in data.get("knowledge_events") or []
+                if isinstance(e, dict)
             ],
             iteration=int(data.get("iteration") or 0),
             spent=float(data.get("spent") or 0.0),

@@ -145,64 +145,72 @@ class HarnessEngine:
         ).resolve()
 
         def distill_checkpoint(checkpoint: str, payload: dict) -> None:
-            if checkpoint == "round_end":
-                raw = KnowledgeDistiller.collapse_repair_loops(
-                    load_run_events(run_dir)
+            try:
+                if checkpoint == "round_end":
+                    collected = list(load_run_events(run_dir))
+                    payload = dict(payload)
+                    payload["slices"] = [
+                        {
+                            "id": plan.id,
+                            "title": plan.title,
+                            "status": plan.status,
+                            "attempts": plan.attempts,
+                        }
+                        for plan in (gf_run.slices if gf_run else [])
+                    ]
+                    collected.append(payload)
+                else:
+                    collected = [payload]
+                events = self.knowledge.distill(
+                    raw_events=collected,
+                    checkpoint=checkpoint,
+                    iteration=run.iteration,
+                    context=(
+                        f"project: {run.project_name}\n"
+                        f"goal: {run.original_goal or '(none)'}"
+                    ),
+                    tracker=tracker,
+                    collapse=(checkpoint == "round_end"),
                 )
-                payload = dict(payload)
-                payload["slices"] = [
-                    {
-                        "id": plan.id,
-                        "title": plan.title,
-                        "status": plan.status,
-                        "attempts": plan.attempts,
-                    }
-                    for plan in (gf_run.slices if gf_run else [])
-                ]
-            else:
-                raw = [payload]
-            events = self.knowledge.distill(
-                raw,
-                checkpoint,
-                run.iteration,
-                context=(
-                    f"project: {run.project_name}\n"
-                    f"goal: {run.original_goal or '(none)'}"
-                ),
-                tracker=tracker,
-            )
-            if not events:
-                return
-            run.knowledge_events.extend(
-                event.to_dict() for event in events
-            )
-            save_distillations(run_dir, events)
-            for event in events:
-                related = [
-                    VaultWriter.event_note_slug(other.to_dict())
-                    for other in events
-                    if other is not event
-                ]
-                self.writer.write_event_note(
-                    event.to_dict(),
-                    run.project_name,
-                    run.iteration,
-                    related=related,
+                if not events:
+                    return
+                run.knowledge_events.extend(
+                    event.to_dict() for event in events
                 )
-            architecture = ""
-            if gf_run is not None:
-                architecture = str(
-                    (self.kernel._load_architecture(run_dir) or {}).get(
-                        "selected", ""
+                save_distillations(run_dir, events)
+                for event in events:
+                    related = [
+                        VaultWriter.event_note_slug(other.to_dict())
+                        for other in events
+                        if other is not event
+                    ]
+                    self.writer.write_event_note(
+                        event.to_dict(),
+                        run.project_name,
+                        run.iteration,
+                        related=related,
                     )
+                architecture = ""
+                if gf_run is not None:
+                    architecture = str(
+                        (self.kernel._load_architecture(run_dir) or {}).get(
+                            "selected", ""
+                        )
+                    )
+                self.writer.write_project_moc(
+                    run.project_name,
+                    run.original_goal or "",
+                    run.status,
+                    run.knowledge_events,
+                    architecture=architecture,
                 )
-            self.writer.write_project_moc(
-                run.project_name,
-                run.original_goal or "",
-                run.status,
-                run.knowledge_events,
-                architecture=architecture,
-            )
+            except Exception as exc:
+                # Distillation is advisory: an LLM/API failure must never
+                # break the build loop or the finalize tail.
+                self.console.print(
+                    f"[yellow]知识蒸馏失败（不影响构建）: {exc}[/yellow]"
+                )
+                return
         session = None
         try:
             self.kernel._validate_budget_pricing(gf_run.options)
@@ -579,6 +587,11 @@ class HarnessEngine:
         )
         if not commands:
             run.status = "failed"
+            optimize_recorder.record_event("harness_run_completed", {
+                "status": "no_commands",
+                "stop_reason": run.stop_state.get("reason", ""),
+                "iteration": run.iteration,
+            })
             save_harness_run(run)
             self.console.print(
                 "[red]brownfield 需要测试命令[/red]：提供 --test-command 或 "
@@ -773,6 +786,11 @@ class HarnessEngine:
             run.stop_state = {
                 "reason": "error", "evidence": {"error": str(exc)},
             }
+            optimize_recorder.record_event("harness_run_completed", {
+                "status": "failed",
+                "stop_reason": run.stop_state.get("reason", ""),
+                "iteration": run.iteration,
+            })
             save_harness_run(run)
             project.status = ProjectStatus.FAILED
             update_project(project)
