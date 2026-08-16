@@ -615,3 +615,116 @@ def test_harness_brownfield_empty_scan_stops_immediately(tmp_path, monkeypatch):
     assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
     assert run.work_items == []
     assert run.iteration == 0
+
+
+def test_harness_brownfield_clears_stale_stop_flag(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (tmp_path / "app.py").write_text("x = 1\n")
+    repo.index.add(["app.py"])
+    repo.index.commit("source")
+    flag = tmp_path / ".onep" / "harness" / "stop_requested"
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.touch()
+
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    monkeypatch.setattr(
+        "onep.harness.engine.analyze_source", lambda *args, **kwargs: [])
+
+    engine = HarnessEngine(llm=BrownfieldFakeLLM())
+    assert engine.run(
+        _brownfield_project(tmp_path),
+        GreenfieldOptions(max_rounds=4, test_commands=["pytest -q"],
+                          deploy_mode="none"),
+    ) is True
+    assert stop_requested(tmp_path) is False
+    run = load_harness_run(tmp_path)
+    assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
+
+
+def test_harness_brownfield_empty_workspace_falls_back_to_greenfield(tmp_path, monkeypatch):
+    _repo(tmp_path)  # README-only repo: no code files
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    monkeypatch.setattr(
+        "onep.harness.engine.analyze_source", lambda *args, **kwargs: [])
+    engine = HarnessEngine(llm=BrownfieldFakeLLM())
+    engine.kernel.optimizer = WritingOptimizer()
+    assert engine.run(
+        _brownfield_project(tmp_path),
+        GreenfieldOptions(max_rounds=4, test_commands=["pytest -q"],
+                          deploy_mode="none"),
+    ) is True
+    run = load_harness_run(tmp_path)
+    assert run.mode == "greenfield"
+
+
+def test_harness_brownfield_parks_candidate_when_plan_generation_fails(tmp_path, monkeypatch):
+    """A planner failure mid-backlog must park the candidate without
+    leaving it marked integrated (no orphan work item, run still completes)."""
+    from onep.strategy.models import StrategyItem
+
+    repo = _repo(tmp_path)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+    (tmp_path / "app.py").write_text("value = 1\n")
+    repo.index.add(["pyproject.toml", "app.py"])
+    repo.index.commit("source")
+
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    monkeypatch.setattr(
+        "onep.harness.engine.analyze_source",
+        lambda source, llm, tracker=None, project_name="", source_files=None,
+        **kwargs: [StrategyItem(
+            id="si-1", title="Cache", file_location="app.py:1",
+            summary="cache issue", tags=["cache"], impact="medium",
+        )],
+    )
+    calls = {"n": 0}
+
+    def flaky_planner(item, workspace, llm_adapter, plan_index=1,
+                      memory_context=""):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return SimpleNamespace(
+                plan_path=str(Path(workspace) / "plan.md"),
+                plan_markdown="# plan", expected_files=("app.py",),
+                dependencies=(), test_commands=("pytest -q",),
+                risk_flags=(),
+            )
+        raise RuntimeError("planner boom")
+
+    monkeypatch.setattr(
+        "onep.harness.engine.generate_optimize_plan", flaky_planner)
+    monkeypatch.setattr(
+        "onep.harness.brownfield.GitRunSession", BrownfieldSession)
+    BrownfieldCoordinator.executed.clear()
+    monkeypatch.setattr(
+        "onep.harness.brownfield.OptimizeCoordinator", BrownfieldCoordinator)
+
+    class BrainstormOnceBrownfieldLLM(BrownfieldFakeLLM):
+        def invoke(self, system_prompt, user_prompt, stage_name):
+            if stage_name == "harness_brainstorm":
+                if not getattr(self, "gave_candidate", False):
+                    self.gave_candidate = True
+                    return ('{"candidates": [{"id": "B-001", '
+                            '"title": "Add CLI", "description": '
+                            '"Expose VALUE via a CLI command"}]}')
+                return '{"candidates": []}'
+            return super().invoke(system_prompt, user_prompt, stage_name)
+
+    engine = HarnessEngine(llm=BrainstormOnceBrownfieldLLM())
+    success = engine.run(
+        _brownfield_project(tmp_path),
+        GreenfieldOptions(max_rounds=4, test_commands=["pytest -q"],
+                          deploy_mode="none"),
+    )
+
+    assert success is True
+    run = load_harness_run(tmp_path)
+    assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
+    assert run.iteration == 2
+    parked = [c for c in run.improvement_candidates
+              if c.status == "parked"]
+    assert [c.id for c in parked] == ["B-001"]
+    assert not any(w.id == "iter1-1" for w in run.work_items)

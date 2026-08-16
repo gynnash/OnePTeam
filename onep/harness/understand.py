@@ -27,9 +27,12 @@ def detect_mode(workspace: Path, requirement: str) -> str:
     no requirement is brownfield (pure optimization).
     """
     from onep.strategy.scanner import walk_files
+    # The harness's own state dir (.onep/harness/run.yaml etc.) is written
+    # before detection runs and must never count as source code.
     has_code = any(
         path.suffix.lower() not in _DOCUMENTATION_EXTENSIONS
         for path in walk_files(Path(workspace))
+        if ".onep" not in path.parts
     )
     if not has_code:
         return "greenfield"

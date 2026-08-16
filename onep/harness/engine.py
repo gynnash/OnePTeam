@@ -96,7 +96,10 @@ class HarnessEngine:
             run.options = HarnessOptions.from_greenfield(options)
         if run.mode != "greenfield":
             detected = detect_mode(workspace, run.original_goal)
-            if detected != "greenfield":
+            if detected == "greenfield":
+                # BROWNFIELD project with no code: treat as greenfield.
+                run.mode = "greenfield"
+            else:
                 run.mode = detected
                 save_harness_run(run)
                 return self._run_brownfield(project, run, workspace, options)
@@ -480,6 +483,10 @@ class HarnessEngine:
         update_project(project)
         save_harness_run(run)
         flow = HarnessFlow()
+        # Clear any stop request left behind by a previous run; otherwise a
+        # stale flag would wedge every brownfield run at PLAN -> USER_STOP
+        # (parity with the greenfield path's clear_stop_request).
+        clear_stop_request(workspace)
         try:
             flow.start_iteration(1)
             flow.transition(HarnessStage.UNDERSTAND)
@@ -616,6 +623,17 @@ class HarnessEngine:
                     })
                     break
                 for index, candidate in enumerate(backlog):
+                    try:
+                        plan_text = self._plan_text_for(
+                            candidate, workspace, index
+                        )
+                    except Exception as exc:
+                        candidate.status = "parked"
+                        self.console.print(
+                            f"[yellow]Plan 生成失败，候选退回候选池: "
+                            f"{candidate.title}: {exc}[/yellow]"
+                        )
+                        continue
                     candidate.status = "integrated"
                     probe = PlanCandidate(
                         id=f"iter{run.iteration}-{index + 1}",
@@ -624,9 +642,7 @@ class HarnessEngine:
                     )
                     item = CandidateAdapter.to_work_item(probe)
                     run.work_items.append(item)
-                    run.work_item_plans[item.id] = (
-                        self._plan_text_for(candidate, workspace, index)
-                    )
+                    run.work_item_plans[item.id] = plan_text
                 flow.transition(HarnessStage.RESEARCH, {
                     "mode": "lightweight", "brownfield": True,
                 })
