@@ -131,6 +131,18 @@ class RaisingNarrativeLLM(ArticleLLM):
         return super().invoke(system_prompt, user_prompt, stage_name)
 
 
+def test_synthesize_frontmatter_carries_title(tmp_path):
+    workspace, run_dir, run = _article_fixture(tmp_path)
+    llm = ArticleLLM([
+        '{"events": []}',
+        '{"title": "Demo Journey", "markdown": "# Demo Journey\\n"}',
+    ])
+    writer = VaultWriter(tmp_path / "global", tmp_path / "project")
+    result = ArticleSynthesizer(llm, writer).synthesize(workspace, run_dir, run)
+    text = result["article_path"].read_text()
+    assert "title: Demo Journey" in text
+
+
 def test_synthesize_falls_back_when_narrative_llm_raises(tmp_path):
     workspace, run_dir, run = _article_fixture(tmp_path)
     llm = RaisingNarrativeLLM([

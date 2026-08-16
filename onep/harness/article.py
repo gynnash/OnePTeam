@@ -336,6 +336,7 @@ class ArticleSynthesizer:
         created = datetime.now(timezone.utc).isoformat()
         frontmatter = {
             "type": "article",
+            "title": narrative["title"],
             "project": run.project_name,
             "iteration": run.iteration,
             "tags": [run.project_name, "article"],
