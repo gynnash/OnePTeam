@@ -142,12 +142,12 @@ class ResearchStage:
         self, goal: str, acceptance_summary: str, architecture_summary: str
     ) -> ResearchReport:
         output = self.llm.invoke(
-            system_prompt=QUESTIONS_PROMPT.format(
+            system_prompt=RESEARCH_SYSTEM,
+            user_prompt=QUESTIONS_PROMPT.format(
                 goal=goal or "(pure code optimization)",
                 acceptance=acceptance_summary or "(none)",
                 architecture=architecture_summary or "(none)",
             ),
-            user_prompt=RESEARCH_SYSTEM,
             stage_name="harness_researcher",
         )
         questions = _str_list(_json_object(output or "").get("questions"))

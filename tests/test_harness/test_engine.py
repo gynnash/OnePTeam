@@ -415,7 +415,7 @@ class ResearchLLM(FakeLLM):
     def invoke(self, system_prompt, user_prompt, stage_name):
         if stage_name == "harness_researcher":
             return ('{"questions": ["cli patterns"]}'
-                    if "questions" in system_prompt or "Produce focused" in system_prompt
+                    if "questions" in user_prompt or "Produce focused" in user_prompt
                     else '{"cards": [{"repo": "cli/repo", "pattern": "builder", '
                          '"module_boundaries": ["parse"], "data_flow": "in->out", '
                          '"evidence_files": ["src/parse.py"], '
