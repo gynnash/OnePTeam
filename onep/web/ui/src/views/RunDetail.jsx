@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { getRunDetail, openEvents, stopProject } from '../api.js';
+import { getLog, getRunDetail, openEvents, stopProject } from '../api.js';
 
 function StageChain({ stages, current }) {
   const rows = [];
@@ -31,6 +31,23 @@ function QualityCurve({ history }) {
   );
 }
 
+// Render a log row: SSE `log` events and the /log backfill both carry the
+// full recorder row ({timestamp, type, stage?, round?, payload}); the inner
+// payload only holds display label/message for greenfield trace rows and the
+// synthetic FLOW/KNOWLEDGE rows. Everything else falls back to stage/type and
+// a compact JSON of the payload so optimize rows render something meaningful.
+function logLine(entry) {
+  const payload = entry && entry.payload;
+  const label = (payload && payload.label) || entry.stage || entry.type || '';
+  let message = (payload && (payload.message || payload.label)) || '';
+  if (!message && payload && typeof payload === 'object' && Object.keys(payload).length > 0) {
+    message = JSON.stringify(payload);
+    if (message.length > 200) message = `${message.slice(0, 200)}…`;
+  }
+  if (!message && entry && entry.type) message = entry.type;
+  return { label, message };
+}
+
 export default function RunDetail({ name, navigate }) {
   const [detail, setDetail] = useState(null);
   const [log, setLog] = useState([]);
@@ -41,6 +58,9 @@ export default function RunDetail({ name, navigate }) {
     let cancelled = false;
     const load = () => getRunDetail(name).then((data) => { if (!cancelled) setDetail(data); }).catch((e) => setError(e.message));
     load();
+    getLog(name, 0).then((data) => {
+      if (!cancelled) setLog((lines) => [...lines, ...data.entries]);
+    }).catch(() => { /* no log yet — the run may not have started */ });
     const timer = setInterval(load, 5000);
     const source = openEvents(name, (event) => {
       if (event.type === 'state') load();
@@ -84,12 +104,15 @@ export default function RunDetail({ name, navigate }) {
       <pre className="evidence">{JSON.stringify(detail.stop_state, null, 2)}</pre>
       <h3>Live log</h3>
       <div className="log" ref={logRef}>
-        {log.map((entry, index) => (
-          <div key={index} className="log-line">
-            <span className="log-label">{entry.payload && entry.payload.label}</span>
-            <span>{entry.payload && entry.payload.message}</span>
-          </div>
-        ))}
+        {log.map((entry, index) => {
+          const { label, message } = logLine(entry);
+          return (
+            <div key={index} className="log-line">
+              {label && <span className="log-label">{label}</span>}
+              <span>{message}</span>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
