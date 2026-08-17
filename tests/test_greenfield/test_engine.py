@@ -3,9 +3,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import git
+import pytest
 from rich.console import Console
 
+from onep.config import load_config
 from onep.greenfield.engine import GreenfieldEngine
+from onep.greenfield.gates import GreenfieldGateRunner
+from onep.greenfield.git_session import GreenfieldGitSession
 from onep.greenfield.models import (
     AcceptanceContract,
     AcceptanceItem,
@@ -15,6 +19,7 @@ from onep.greenfield.models import (
 )
 from onep.strategy.models import StrategyItem
 from onep.strategy.gates import PatchScopeGate
+from onep.strategy.repair import AttemptStagnationDetector
 from onep.llm.cost import CostTracker
 from onep.llm.adapters import TokenUsage
 from onep.persistence.models import Project, ProjectMode
@@ -1157,3 +1162,77 @@ def test_hardening_ids_are_unique_and_bounded_by_prefix_count():
         GreenfieldEngine._next_hardening_id(run, "final-architecture-hardening")
         == "final-architecture-hardening-3"
     )
+
+
+class AlwaysFailingOptimizer:
+    def execute_attempt(self, item, source_path, workspace, llm, feedback="", **kwargs):
+        root = Path(source_path)
+        (root / "app.py").write_text("VALUE = 9\n")
+        (root / "test_app.py").write_text(
+            "from app import VALUE\n\ndef test_value():\n    assert VALUE == 1\n"
+        )
+        return EngineAttemptResult("implemented")
+
+
+def _kernel_setup(tmp_path):
+    _repo(tmp_path)
+    engine = GreenfieldEngine(llm=FakeLLM())
+    run = GreenfieldRun(
+        id="gf-x", project_name="demo", requirement="demo",
+        workspace=str(tmp_path),
+        options=GreenfieldOptions(
+            max_repairs_per_slice=2, test_commands=["pytest -q"],
+        ),
+    )
+    plan = SlicePlan(
+        "core", "Core", "set value", ["REQ-1"],
+        ["app.py", "test_app.py"], [],
+    )
+    run.slices = [plan]
+    contract = AcceptanceContract([
+        AcceptanceItem(
+            id="REQ-1", priority="P0", behavior="value is one",
+            commands=["pytest -q"],
+        ),
+    ])
+    session = GreenfieldGitSession(tmp_path, "gf-x")
+    session.start()
+    run_dir = tmp_path / ".onep" / "greenfield" / "runs" / "gf-x"
+    recorder = GreenfieldRecorder(run_dir, run, Console())
+    return engine, run, plan, contract, session, recorder
+
+
+def test_execute_slice_fires_distill_checkpoints(tmp_path):
+    engine, run, plan, contract, session, recorder = _kernel_setup(tmp_path)
+    engine.optimizer = RepairingOptimizer()
+    calls = []
+    engine._execute_slice(
+        run, plan, contract, session, ["pytest -q"],
+        GreenfieldGateRunner(load_config().pipeline.test_timeout),
+        recorder, CostTracker(0.0), AttemptStagnationDetector(3),
+        distill=lambda checkpoint, payload: calls.append((checkpoint, payload)),
+    )
+    assert [name for name, _ in calls] == ["review_complete", "slice_complete"]
+    _, payload = calls[1]
+    assert payload["plan_id"] == "core"
+    assert payload["commit_sha"] == plan.commit_sha
+    assert "app.py" in payload["changed"]
+
+
+def test_execute_slice_repair_failed_checkpoint(tmp_path):
+    engine, run, plan, contract, session, recorder = _kernel_setup(tmp_path)
+    engine.optimizer = AlwaysFailingOptimizer()
+    run.options.max_repairs_per_slice = 0
+    calls = []
+    with pytest.raises(RuntimeError, match="Repair attempts exhausted"):
+        engine._execute_slice(
+            run, plan, contract, session, ["pytest -q"],
+            GreenfieldGateRunner(load_config().pipeline.test_timeout),
+            recorder, CostTracker(0.0), AttemptStagnationDetector(3),
+            distill=lambda checkpoint, payload: calls.append((checkpoint, payload)),
+        )
+    assert calls[-1][0] == "repair_failed"
+    payload = calls[-1][1]
+    assert payload["loop_stagnant"] is False
+    assert payload["retry_count"] == 1
+    assert payload["failure_type"] == "test_failed"

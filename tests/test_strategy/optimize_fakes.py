@@ -106,7 +106,10 @@ def install_fake_optimize_services(monkeypatch, tmp_path):
     generated = []
     analyzed_paths = []
 
-    def analyze(path, llm, tracker, project_name="", source_files=None):
+    def analyze(
+        path, llm, tracker, project_name="", source_files=None,
+        budgeted=None, memory_context=None,
+    ):
         analyzed_paths.append(Path(path))
         return [
             StrategyItem(
@@ -139,7 +142,7 @@ def install_fake_optimize_services(monkeypatch, tmp_path):
     monkeypatch.setattr("onep.cli.optimize_cmd.GitRunSession", FakeGitSession)
     monkeypatch.setattr("onep.cli.optimize_cmd.OptimizeRunRecorder", FakeRecorder)
     monkeypatch.setattr("onep.cli.optimize_cmd.OptimizeCoordinator", FakeCoordinator)
-    monkeypatch.setattr("onep.cli.optimize_cmd._analyze", analyze)
+    monkeypatch.setattr("onep.cli.optimize_cmd.analyze_source", analyze)
     monkeypatch.setattr("onep.cli.optimize_cmd.generate_optimize_plan", generate)
     monkeypatch.setattr("onep.cli.optimize_cmd._memory_context", lambda *a: "")
     monkeypatch.setattr("onep.cli.optimize_cmd.build_project_context", lambda *a: "")

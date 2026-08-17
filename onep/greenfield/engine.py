@@ -12,6 +12,8 @@ import shlex
 import sys
 import uuid
 
+from typing import Any, Callable
+
 import click
 from rich.console import Console
 import yaml
@@ -163,47 +165,10 @@ class GreenfieldEngine:
                 workspace, run, contract, self._load_architecture(run_dir)
             )
             self._commit_design_docs(session)
-            mandatory = self._slice_gate_commands(workspace, run)
-            gate_runner = GreenfieldGateRunner(load_config().pipeline.test_timeout)
-            detector = AttemptStagnationDetector(3)
-            requirements_satisfied = self._requirements_satisfied(
-                run, contract, session, gate_runner, recorder, tracker
+            requirements_satisfied = self.build_pending_slices(
+                run, contract, session, recorder, tracker
             )
-
-            if not requirements_satisfied:
-                for index in range(run.current_slice, len(run.slices)):
-                    plan = run.slices[index]
-                    if plan.status == "completed":
-                        continue
-                    run.current_slice = index
-                    self._execute_slice(
-                        run,
-                        plan,
-                        contract,
-                        session,
-                        mandatory,
-                        gate_runner,
-                        recorder,
-                        tracker,
-                        detector,
-                    )
-                    mandatory = self._slice_gate_commands(workspace, run)
-                    requirements_satisfied = False
-                    if contract.required_complete:
-                        requirements_satisfied = self._requirements_satisfied(
-                            run, contract, session, gate_runner, recorder, tracker
-                        )
-                    if requirements_satisfied:
-                        for remaining in run.slices[index + 1 :]:
-                            if remaining.status == "pending":
-                                remaining.status = "skipped_satisfied"
-                                recorder.save_slice(remaining)
-                        recorder.trace(
-                            "SATISFIED",
-                            "完整需求已经通过验收，停止执行剩余切片",
-                            "green",
-                        )
-                        break
+            gate_runner = GreenfieldGateRunner(load_config().pipeline.test_timeout)
 
             mandatory = self._final_gate_commands(workspace, run, contract)
             self._final_verify(
@@ -326,6 +291,7 @@ class GreenfieldEngine:
         recorder: GreenfieldRecorder,
         tracker: CostTracker,
         detector: AttemptStagnationDetector,
+        distill: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         feedback = ""
         last_events: tuple[dict, ...] = ()
@@ -373,7 +339,7 @@ class GreenfieldEngine:
             recorder.trace(
                 "STATE",
                 f"累计工程轮次 {run.round_number}；本次剩余 "
-                f"{run.options.max_rounds - (run.round_number - self._round_start)}；"
+                f"{run.options.max_rounds - (run.round_number - getattr(self, '_round_start', run.round_number))}；"
                 f"当前切片修复 {repair}/{run.options.max_repairs_per_slice}",
                 "blue",
             )
@@ -629,6 +595,16 @@ class GreenfieldEngine:
                 )
                 self._track(tracker, "code_reviewer")
                 recorder.save_review(plan, review.to_dict())
+                if distill is not None:
+                    distill("review_complete", {
+                        "plan_id": plan.id,
+                        "plan_title": plan.title,
+                        "iteration": run.round_number,
+                        "review_passed": review.passed,
+                        "review_findings": list(review.findings),
+                        "changed": list(changed),
+                        "diff": diff,
+                    })
                 blocking_findings = self._credible_review_findings(review, tests)
                 if not review.passed and blocking_findings:
                     failure_type = "review_failed"
@@ -662,6 +638,17 @@ class GreenfieldEngine:
                 recorder.clear_wip(plan)
                 recorder.save_diff(plan, diff)
                 recorder.save_slice(plan)
+                if distill is not None:
+                    distill("slice_complete", {
+                        "plan_id": plan.id,
+                        "plan_title": plan.title,
+                        "iteration": run.round_number,
+                        "attempts": plan.attempts,
+                        "commit_sha": plan.commit_sha,
+                        "changed": list(changed),
+                        "diff": diff,
+                        "tests_passed": bool(tests and tests.passed),
+                    })
                 self._mark_acceptance(contract, plan, current_mandatory)
                 recorder.save_contract(contract)
                 recorder.trace(
@@ -693,6 +680,19 @@ class GreenfieldEngine:
             )
             if detector.observe(brief):
                 session.rollback_attempt()
+                if distill is not None:
+                    distill("repair_failed", {
+                        "plan_id": plan.id,
+                        "plan_title": plan.title,
+                        "iteration": run.round_number,
+                        "retry_count": repair + 1,
+                        "loop_stagnant": True,
+                        "failure_type": brief.failure_type,
+                        "primary_error": brief.primary_error,
+                        "failing_command": brief.failing_command,
+                        "diff_sha": brief.diff_sha,
+                        "files": list(brief.relevant_files),
+                    })
                 raise RuntimeError(
                     "Loop stuck: the same failure and diff repeated 3 times. "
                     + brief.primary_error
@@ -706,6 +706,19 @@ class GreenfieldEngine:
                         "yellow",
                     )
                 session.rollback_attempt()
+                if distill is not None:
+                    distill("repair_failed", {
+                        "plan_id": plan.id,
+                        "plan_title": plan.title,
+                        "iteration": run.round_number,
+                        "retry_count": repair + 1,
+                        "loop_stagnant": False,
+                        "failure_type": brief.failure_type,
+                        "primary_error": brief.primary_error,
+                        "failing_command": brief.failing_command,
+                        "diff_sha": brief.diff_sha,
+                        "files": list(brief.relevant_files),
+                    })
                 raise RuntimeError(
                     f"Repair attempts exhausted for {plan.id}: {brief.primary_error}"
                 )
@@ -872,6 +885,7 @@ class GreenfieldEngine:
         recorder: GreenfieldRecorder,
         tracker: CostTracker,
         allow_repair: bool = True,
+        distill: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         run.stage = GreenfieldStage.FULL_VERIFY
         if not mandatory:
@@ -914,6 +928,7 @@ class GreenfieldEngine:
                     recorder,
                     tracker,
                     AttemptStagnationDetector(3),
+                    distill=distill,
                 )
                 refreshed = list(
                     dict.fromkeys(
@@ -929,6 +944,7 @@ class GreenfieldEngine:
                     recorder,
                     tracker,
                     allow_repair=True,
+                    distill=distill,
                 )
             raise RuntimeError(
                 f"Full verification failed: {failed.command}: {raw_failure[-1500:]}"
@@ -987,6 +1003,7 @@ class GreenfieldEngine:
                     recorder,
                     tracker,
                     AttemptStagnationDetector(3),
+                    distill=distill,
                 )
                 refreshed = list(
                     dict.fromkeys(
@@ -1005,6 +1022,7 @@ class GreenfieldEngine:
                     recorder,
                     tracker,
                     allow_repair=True,
+                    distill=distill,
                 )
             raise RuntimeError("Final architecture review failed: " + detail)
         run.stage = GreenfieldStage.DEPLOY_VERIFY
@@ -1042,6 +1060,7 @@ class GreenfieldEngine:
                     recorder,
                     tracker,
                     AttemptStagnationDetector(3),
+                    distill=distill,
                 )
                 return self._final_verify(
                     run,
@@ -1052,6 +1071,7 @@ class GreenfieldEngine:
                     recorder,
                     tracker,
                     allow_repair=True,
+                    distill=distill,
                 )
             raise RuntimeError(f"Deployment verification failed: {failed.command}")
 
@@ -1578,6 +1598,59 @@ class GreenfieldEngine:
             "docs: persist detailed product and implementation plan"
         ).hexsha
 
+    def build_pending_slices(
+        self,
+        run: GreenfieldRun,
+        contract: AcceptanceContract,
+        session: GreenfieldGitSession,
+        recorder: GreenfieldRecorder,
+        tracker: CostTracker,
+        respect_satisfied_early_exit: bool = True,
+        distill: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> bool:
+        """Execute pending slices until satisfied or exhausted.
+
+        The harness passes respect_satisfied_early_exit=False for
+        post-acceptance iterations whose new slices expand scope beyond
+        the original contract.
+        """
+        workspace = session.workspace
+        mandatory = self._slice_gate_commands(workspace, run)
+        gate_runner = GreenfieldGateRunner(load_config().pipeline.test_timeout)
+        detector = AttemptStagnationDetector(3)
+        if respect_satisfied_early_exit and self._requirements_satisfied(
+            run, contract, session, gate_runner, recorder, tracker
+        ):
+            return True
+        for index in range(run.current_slice, len(run.slices)):
+            plan = run.slices[index]
+            if plan.status == "completed":
+                continue
+            run.current_slice = index
+            self._execute_slice(
+                run, plan, contract, session, mandatory, gate_runner,
+                recorder, tracker, detector, distill=distill,
+            )
+            mandatory = self._slice_gate_commands(workspace, run)
+            if (
+                respect_satisfied_early_exit
+                and contract.required_complete
+                and self._requirements_satisfied(
+                    run, contract, session, gate_runner, recorder, tracker
+                )
+            ):
+                for remaining in run.slices[index + 1 :]:
+                    if remaining.status == "pending":
+                        remaining.status = "skipped_satisfied"
+                        recorder.save_slice(remaining)
+                recorder.trace(
+                    "SATISFIED", "完整需求已经通过验收，停止执行剩余切片", "green"
+                )
+                return True
+        return self._requirements_satisfied(
+            run, contract, session, gate_runner, recorder, tracker
+        )
+
     @staticmethod
     def _slice_prompt(
         run: GreenfieldRun,
@@ -1913,6 +1986,13 @@ class GreenfieldEngine:
                 cls._normalize_python_command(cmd) for cmd in plan.focused_commands
             ]
             if not plan.focused_commands:
+                mirrors = {
+                    Path("tests") / f"test_{Path(value).stem}.py"
+                    for value in plan.expected_files
+                    if Path(value).suffix == ".py"
+                    and Path(value).parts[0] not in {"test", "tests"}
+                    and Path(value).name != "__init__.py"
+                }
                 declared_tests = sorted(
                     value
                     for value in plan.expected_files
@@ -1920,6 +2000,7 @@ class GreenfieldEngine:
                     and Path(value).name.startswith("test_")
                     and Path(value).parts
                     and Path(value).parts[0] in {"test", "tests"}
+                    and Path(value) not in mirrors
                 )
                 if declared_tests:
                     plan.focused_commands = [
@@ -2257,7 +2338,8 @@ class GreenfieldEngine:
         run: GreenfieldRun,
         tracker: CostTracker,
     ) -> None:
-        if run.round_number - self._round_start >= run.options.max_rounds:
+        round_start = getattr(self, "_round_start", run.round_number)
+        if run.round_number - round_start >= run.options.max_rounds:
             raise RuntimeError(
                 f"Maximum engineering rounds reached: {run.options.max_rounds}"
             )

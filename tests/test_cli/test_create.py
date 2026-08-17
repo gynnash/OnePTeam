@@ -1,6 +1,7 @@
 from click.testing import CliRunner
 import git
 
+from onep.cli.create import create_project, default_project_name
 from onep.main import cli
 
 
@@ -76,3 +77,19 @@ def test_create_runs_engineering_loop_by_default(tmp_path, monkeypatch):
     assert called[0][0] == "auto"
     assert called[0][1].max_rounds == 100
     assert called[0][1].max_repairs_per_slice == 8
+
+
+def test_create_project_function_creates_workspace(tmp_path, monkeypatch):
+    monkeypatch.setattr("onep.persistence.database._config_dir", lambda: tmp_path)
+    workspace = tmp_path / "ws"
+    project = create_project("build a calculator", name="calc", workspace=workspace)
+    assert project.name == "calc"
+    assert project.workspace_path == str(workspace.resolve())
+    assert (workspace / "README.md").exists()
+    assert (workspace / "docs").is_dir()
+    assert (workspace / ".onep" / "state.yaml").exists()
+
+
+def test_create_project_default_name_from_requirement():
+    assert default_project_name("Build a CLI Tool!") == "BuildaCLITool"
+    assert default_project_name("")  # falls back to project-<hex>
