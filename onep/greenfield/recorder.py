@@ -1,14 +1,18 @@
 """Durable Greenfield run records and user-facing traces."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
+import re
 import tempfile
 import time
 import shutil
 
 from rich.console import Console
+from rich.markup import escape
 import yaml
 
 from onep.greenfield.models import AcceptanceContract, GreenfieldRun, SlicePlan
@@ -22,11 +26,16 @@ class GreenfieldRecorder:
         self.started = time.monotonic()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._engineer_stats: dict = {}
+        self._failure_counts: dict[str, int] = {}
 
     def begin_engineer_attempt(self) -> None:
         self._engineer_stats = {
-            "rounds": 0, "reads": 0, "writes": 0, "commands": 0,
+            "rounds": 0,
+            "reads": 0,
+            "writes": 0,
+            "commands": 0,
             "messages": [],
+            "tool_context": {},
         }
 
     def save_run(self) -> None:
@@ -46,45 +55,82 @@ class GreenfieldRecorder:
         return path
 
     def save_attempt(self, plan: SlicePlan, number: int, data: dict) -> Path:
-        path = (
-            self.run_dir / "slices" / plan.id / "attempts"
-            / f"{number:02d}.yaml"
-        )
+        path = self.run_dir / "slices" / plan.id / "attempts" / f"{number:02d}.yaml"
         self._write_yaml(path, data)
         return path
 
     def save_review(self, plan: SlicePlan, data: dict) -> None:
-        self._write_json(
-            self.run_dir / "slices" / plan.id / "review.json", data
-        )
+        self._write_json(self.run_dir / "slices" / plan.id / "review.json", data)
 
     def save_diff(self, plan: SlicePlan, diff: str) -> None:
-        self._write_text(
-            self.run_dir / "slices" / plan.id / "final.diff", diff
-        )
+        self._write_text(self.run_dir / "slices" / plan.id / "final.diff", diff)
 
     def architecture_decision(self, data: dict) -> None:
         self._append_jsonl(self.run_dir / "architecture-decisions.jsonl", data)
         self._append_jsonl(
-            Path(self.run.workspace) / ".onep" / "greenfield"
+            Path(self.run.workspace)
+            / ".onep"
+            / "greenfield"
             / "architecture-decisions.jsonl",
             data,
         )
 
     def event(self, event_type: str, payload: dict | None = None) -> None:
-        self._append_jsonl(self.run_dir / "events.jsonl", {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "type": event_type,
-            "stage": self.run.stage.value,
-            "round": self.run.round_number,
-            "payload": payload or {},
-        })
+        self._append_jsonl(
+            self.run_dir / "events.jsonl",
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "type": event_type,
+                "stage": self.run.stage.value,
+                "round": self.run.round_number,
+                "payload": payload or {},
+            },
+        )
 
     def trace(self, stage: str, message: str, style: str = "cyan") -> None:
         elapsed = int(time.monotonic() - self.started)
         stamp = f"{elapsed // 3600:02d}:{elapsed % 3600 // 60:02d}:{elapsed % 60:02d}"
-        self.console.print(f"[{style}][{stamp}] [{stage}] {message}[/{style}]")
+        self.console.print(f"[{style}][{stamp}] [{stage}] {escape(message)}[/{style}]")
         self.event("trace", {"label": stage, "message": message})
+
+    def failure(
+        self,
+        stage: str,
+        failure_type: str,
+        detail: object,
+        *,
+        context: str = "",
+    ) -> int:
+        """Persist every failure and compact repeated console output."""
+        raw_detail = str(detail or "No diagnostic output.")
+        diagnostic = self._diagnostic(raw_detail)
+        signature = hashlib.sha256(
+            f"{stage}\0{failure_type}\0{diagnostic}".encode("utf-8")
+        ).hexdigest()
+        count = self._failure_counts.get(signature, 0) + 1
+        self._failure_counts[signature] = count
+        emit = count <= 3 or count % 3 == 0
+        self.event(
+            "failure_observed",
+            {
+                "label": stage,
+                "failure_type": failure_type,
+                "context": context,
+                "detail": raw_detail,
+                "diagnostic": diagnostic,
+                "repeat_count": count,
+                "console_emitted": emit,
+            },
+        )
+        if emit:
+            repeat = "首次" if count == 1 else f"同类失败累计 {count} 次"
+            location = f" | {context}" if context else ""
+            self.trace(
+                stage,
+                f"{failure_type}（{repeat}）{location} | {diagnostic}",
+                "yellow",
+            )
+        return count
 
     def engineer_event(self, event: dict) -> None:
         """Persist full trajectory and print safe observable progress summaries."""
@@ -107,13 +153,22 @@ class GreenfieldRecorder:
             detail = ""
             for key in ("path", "file_path", "command", "operation", "query"):
                 if key in args:
-                    detail = f" {key}={self._brief(args[key])}"
+                    detail = f" {key}={self._brief(self._redact(args[key]))}"
                     break
+            self._engineer_stats["tool_context"][tool] = detail.strip()
             if self.run.options.verbose:
                 self.trace("TOOL", f"准备执行 {tool}{detail}", "dim")
         elif event_type == "tool_completed":
             tool = str(payload.get("tool_name") or "unknown")
-            result = self._brief(payload.get("tool_result") or "完成")
+            raw_result = str(payload.get("tool_result") or "完成")
+            result = self._brief(raw_result)
+            if self._tool_failed(raw_result):
+                self.failure(
+                    "TOOL_FAIL",
+                    tool,
+                    raw_result,
+                    context=self._engineer_stats.get("tool_context", {}).get(tool, ""),
+                )
             if self.run.options.verbose:
                 self.trace("TOOL", f"{tool} 完成：{result}", "dim")
         elif event_type == "model_message":
@@ -127,6 +182,14 @@ class GreenfieldRecorder:
                 "连续检查后尚未修改文件，已要求模型停止宽泛分析并批量实现当前切片",
                 "yellow",
             )
+        elif event_type == "implementation_deadline":
+            self.trace(
+                "PROGRESS",
+                "已进入实现截止阶段：停止继续读取和测试，剩余轮次只允许完成代码修改",
+                "yellow",
+            )
+        elif event_type == "implementation_read_blocked" and self.run.options.verbose:
+            self.trace("TOOL", "实现截止阶段已拦截新的只读操作", "dim")
         elif event_type == "full_test_blocked":
             self.trace(
                 "TEST",
@@ -135,7 +198,8 @@ class GreenfieldRecorder:
             )
         elif event_type == "loop_limit_reached":
             self.trace(
-                "MODEL", f"达到工具轮次上限 {payload.get('rounds', '?')}，实现尚未完成",
+                "MODEL",
+                f"达到工具轮次上限 {payload.get('rounds', '?')}，实现尚未完成",
                 "yellow",
             )
         elif event_type == "loop_stuck":
@@ -143,12 +207,16 @@ class GreenfieldRecorder:
         elif event_type == "loop_completed":
             if self.run.options.verbose:
                 self.trace(
-                    "MODEL", f"模型完成本轮实现，共 {payload.get('rounds', '?')} 个工具轮次",
+                    "MODEL",
+                    f"模型完成本轮实现，共 {payload.get('rounds', '?')} 个工具轮次",
                     "green",
                 )
 
     def engineer_summary(
-        self, output: str, changed_files: list[str], termination_reason: str,
+        self,
+        output: str,
+        changed_files: list[str],
+        termination_reason: str,
     ) -> None:
         stats = self._engineer_stats
         summary = self._brief(output, 600)
@@ -166,22 +234,79 @@ class GreenfieldRecorder:
     @staticmethod
     def _brief(value, limit: int = 180) -> str:
         text = " ".join(str(value).split())
-        return text if len(text) <= limit else text[:limit - 3] + "..."
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    @staticmethod
+    def _tool_failed(result: str) -> bool:
+        lowered = result.strip().lower()
+        return (
+            lowered.startswith(("error:", "failed:", "command timed out"))
+            or "traceback (most recent call last)" in lowered
+            or re.search(r"\[exit:\s*[1-9]\d*\]", lowered) is not None
+        )
+
+    @staticmethod
+    def _diagnostic(value: str, limit: int = 900) -> str:
+        """Select actionable error lines rather than an arbitrary output tail."""
+        lines = [re.sub(r"\s+", " ", line).strip() for line in value.splitlines()]
+        meaningful = [line for line in lines if line]
+        selected = []
+        markers = (
+            "error",
+            "failed",
+            "exception",
+            "traceback",
+            "assert",
+            "timeout",
+            "timed out",
+            "exit:",
+            "no such file",
+            "cannot ",
+            "can't ",
+        )
+        for line in meaningful:
+            lowered = line.lower()
+            if any(marker in lowered for marker in markers) and line not in selected:
+                selected.append(line)
+        if not selected:
+            selected = meaningful[-4:]
+        text = GreenfieldRecorder._redact(" | ".join(selected))
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    @staticmethod
+    def _redact(value: object) -> str:
+        text = str(value)
+        text = re.sub(
+            r"(?i)\b(api[_-]?key|access[_-]?token|token|password|authorization)"
+            r"(\s*[=:]\s*)([^\s]+)",
+            r"\1\2***",
+            text,
+        )
+        return re.sub(r"(?i)\bBearer\s+[^\s]+", "Bearer ***", text)
 
     def save_wip(
-        self, plan: SlicePlan, changed_files: list[str], workspace: Path,
+        self,
+        plan: SlicePlan,
+        changed_files: list[str],
+        workspace: Path,
     ) -> None:
         root = self.run_dir / "slices" / plan.id / "wip"
         if root.exists():
             shutil.rmtree(root)
         files_root = root / "files"
         saved = []
+        deleted = []
         workspace = Path(workspace).resolve()
         for relative in changed_files:
+            if self._is_runtime_wip_path(Path(relative)):
+                continue
             source = workspace / relative
             try:
                 source.resolve().relative_to(workspace)
             except (OSError, ValueError):
+                continue
+            if not source.exists():
+                deleted.append(relative)
                 continue
             if not source.is_file() or source.is_symlink():
                 continue
@@ -189,10 +314,38 @@ class GreenfieldRecorder:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
             saved.append(relative)
-        self._write_json(root / "manifest.json", {
-            "plan_id": plan.id, "files": saved,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-        })
+        self._write_json(
+            root / "manifest.json",
+            {
+                "plan_id": plan.id,
+                "files": saved,
+                "deleted": deleted,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    @staticmethod
+    def _is_runtime_wip_path(path: Path) -> bool:
+        if not path.parts:
+            return False
+        roots = {
+            "tmp",
+            "temp",
+            ".tmp",
+            ".cache",
+            "cache",
+            "output",
+            "outputs",
+            "log",
+            "logs",
+            ".coverage",
+            "coverage",
+            "htmlcov",
+        }
+        name = path.name.lower()
+        return path.parts[0].lower() in roots or name.endswith(
+            (".log", ".db", ".db-wal", ".db-shm", ".db-journal")
+        )
 
     def restore_wip(self, plan: SlicePlan, workspace: Path) -> list[str]:
         root = self.run_dir / "slices" / plan.id / "wip"
@@ -219,6 +372,15 @@ class GreenfieldRecorder:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
             restored.append(relative)
+        for relative in data.get("deleted") or []:
+            target = workspace / relative
+            try:
+                target.resolve().relative_to(workspace)
+            except (OSError, ValueError):
+                continue
+            if target.is_file() or target.is_symlink():
+                target.unlink()
+                restored.append(relative)
         return restored
 
     def clear_wip(self, plan: SlicePlan) -> None:
@@ -259,8 +421,11 @@ class GreenfieldRecorder:
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", dir=path.parent,
-                prefix=f".{path.name}.", delete=False,
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                delete=False,
             ) as handle:
                 temporary = Path(handle.name)
                 handle.write(content)

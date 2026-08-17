@@ -11,6 +11,24 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _string_list(value: Any, *, collapse_legacy_chars: bool = False) -> list[str]:
+    """Normalize model/YAML scalar-or-list fields without splitting strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if not isinstance(value, (list, tuple, set)):
+        value = [value]
+    raw_items = [str(item) for item in value]
+    if (
+        collapse_legacy_chars and len(raw_items) > 1
+        and all(len(item) == 1 for item in raw_items)
+    ):
+        joined = "".join(raw_items)
+        return [joined] if joined.strip() else []
+    return [item for item in raw_items if item.strip()]
+
+
 class GreenfieldStage(str, Enum):
     INIT = "init"
     DISCOVER = "discover"
@@ -61,7 +79,7 @@ class GreenfieldOptions:
             max_rounds=max_rounds,
             max_repairs_per_slice=max_repairs,
             max_cost=max(0.0, float(raw.get("max_cost", 0.0))),
-            test_commands=list(raw.get("test_commands") or []),
+            test_commands=_string_list(raw.get("test_commands")),
             deploy_mode=str(raw.get("deploy_mode") or "verify"),
             non_interactive=bool(raw.get("non_interactive", False)),
             verbose=bool(raw.get("verbose", False)),
@@ -87,11 +105,13 @@ class AcceptanceItem:
             id=str(data.get("id") or "REQ-001"),
             priority=str(data.get("priority") or "P1").upper(),
             behavior=str(data.get("behavior") or "Requirement is satisfied"),
-            commands=list(
+            commands=_string_list(
                 verification.get("commands") or data.get("commands") or []
+                , collapse_legacy_chars=True
             ),
-            evidence=list(
+            evidence=_string_list(
                 verification.get("evidence") or data.get("evidence") or []
+                , collapse_legacy_chars=True
             ),
             status=str(data.get("status") or "pending"),
         )
@@ -148,9 +168,11 @@ class SlicePlan:
             id=str(data.get("id") or f"slice-{index + 1}"),
             title=str(data.get("title") or f"Slice {index + 1}"),
             objective=str(data.get("objective") or data.get("summary") or ""),
-            acceptance_ids=list(data.get("acceptance_ids") or []),
-            expected_files=list(data.get("expected_files") or []),
-            focused_commands=list(data.get("focused_commands") or []),
+            acceptance_ids=_string_list(data.get("acceptance_ids")),
+            expected_files=_string_list(data.get("expected_files")),
+            focused_commands=_string_list(
+                data.get("focused_commands"), collapse_legacy_chars=True
+            ),
             status=str(data.get("status") or "pending"),
             attempts=int(data.get("attempts") or 0),
             commit_sha=str(data.get("commit_sha") or ""),

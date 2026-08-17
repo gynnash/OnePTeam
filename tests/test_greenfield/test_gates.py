@@ -32,6 +32,8 @@ def test_accepts_safe_greenfield_executable_verification_commands():
         "python src/collect --all --since 2025-03-24",
         "sqlite3 data/items.db 'SELECT count(*) FROM items;'",
         "bash scripts/run_weekly.sh",
+        "ruff check . --fix",
+        "ruff format .",
     ])
 
 

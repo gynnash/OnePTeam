@@ -1,4 +1,5 @@
 """Code linting compatible with CrewAI agents."""
+
 from __future__ import annotations
 
 import subprocess
@@ -20,8 +21,11 @@ class LintTool(BaseTool):
         """
         try:
             result = subprocess.run(
-                ["ruff", "check", path, "--output-format=text"],
-                capture_output=True, text=True, cwd=self.workspace, timeout=60,
+                ["ruff", "check", path],
+                capture_output=True,
+                text=True,
+                cwd=self.workspace,
+                timeout=60,
             )
             if result.returncode == 0:
                 return "No issues found.\n" + (result.stdout or "")

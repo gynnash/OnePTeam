@@ -1,4 +1,5 @@
 """LLM invocation via LiteLLM, abstracting provider differences."""
+
 from __future__ import annotations
 
 import inspect
@@ -21,6 +22,7 @@ console = Console()
 @dataclass(frozen=True)
 class TokenUsage:
     """Token usage stats from the most recent LLM call."""
+
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
@@ -53,10 +55,13 @@ class LLMAdapter:
         api_key = get_api_key(provider)
         api_base = get_api_base(provider)
 
-        kwargs = {"model": model_name, "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]}
+        kwargs = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
         if api_key:
             kwargs["api_key"] = api_key
         if api_base:
@@ -66,17 +71,24 @@ class LLMAdapter:
         self._capture_usage(response)
         return response.choices[0].message.content
 
-    def invoke_stream(self, system_prompt: str, user_prompt: str, stage_name: str) -> Iterator[str]:
+    def invoke_stream(
+        self, system_prompt: str, user_prompt: str, stage_name: str
+    ) -> Iterator[str]:
         """Stream LLM response token by token. Usage captured from final chunk."""
         self.reset_usage()
         model_name, provider = resolve_model(stage_name)
         api_key = get_api_key(provider)
         api_base = get_api_base(provider)
 
-        kwargs = {"model": model_name, "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ], "stream": True, "stream_options": {"include_usage": True}}
+        kwargs = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
         if api_key:
             kwargs["api_key"] = api_key
         if api_base:
@@ -128,6 +140,12 @@ class LLMAdapter:
         rounds = 0
         mutated = False
         mutation_nudged = False
+        edit_recovery_required = False
+        implementation_deadline_round = (
+            max(mutation_nudge_round + 1, max_tool_rounds - 3)
+            if mutation_nudge_round > 0
+            else 0
+        )
         while rounds < max_tool_rounds:
             rounds += 1
             trajectory.emit("model_round_started", round=rounds)
@@ -187,9 +205,7 @@ class LLMAdapter:
                 text_content = "".join(content_parts).strip()
                 if text_content:
                     assistant_msg["content"] = text_content
-                    trajectory.emit(
-                        "model_message", round=rounds, content=text_content
-                    )
+                    trajectory.emit("model_message", round=rounds, content=text_content)
                 tc_list = []
                 tool_results: list[dict] = []  # collect, append after assistant
                 for idx in sorted(tool_calls_acc.keys()):
@@ -198,18 +214,21 @@ class LLMAdapter:
                         args = json.loads(tc_data["args_str"])
                     except json.JSONDecodeError:
                         args = {}
-                    tc_list.append({
-                        "id": tc_data["id"],
-                        "type": "function",
-                        "function": {"name": tc_data["name"], "arguments": json.dumps(args, ensure_ascii=False)},
-                    })
+                    tc_list.append(
+                        {
+                            "id": tc_data["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc_data["name"],
+                                "arguments": json.dumps(args, ensure_ascii=False),
+                            },
+                        }
+                    )
 
                     # execute tool
                     tool = tool_map.get(tc_data["name"])
                     if tool:
-                        stuck_reason = detector.observe_call(
-                            tc_data["name"], args
-                        )
+                        stuck_reason = detector.observe_call(tc_data["name"], args)
                         trajectory.emit(
                             "tool_requested",
                             round=rounds,
@@ -231,11 +250,25 @@ class LLMAdapter:
                             "tool_args": args,
                         }
                         if (
+                            implementation_deadline_round
+                            and rounds >= implementation_deadline_round
+                            and _is_observation_only_tool(tc_data["name"], args)
+                            and not edit_recovery_required
+                        ):
+                            result = (
+                                "Blocked: implementation deadline reached. Enough context "
+                                "has been collected; use file_write/edit or a mutating shell "
+                                "command to finish the planned patch now."
+                            )
+                            trajectory.emit(
+                                "implementation_read_blocked",
+                                round=rounds,
+                                tool_name=tc_data["name"],
+                            )
+                        elif (
                             block_full_test_commands
                             and tc_data["name"] == "shell"
-                            and _is_broad_pytest_command(
-                                str(args.get("command") or "")
-                            )
+                            and _is_broad_pytest_command(str(args.get("command") or ""))
                         ):
                             result = (
                                 "Blocked: full-suite pytest is owned by the external "
@@ -243,7 +276,8 @@ class LLMAdapter:
                                 "its focused tests."
                             )
                             trajectory.emit(
-                                "full_test_blocked", round=rounds,
+                                "full_test_blocked",
+                                round=rounds,
                                 command=str(args.get("command") or ""),
                             )
                         else:
@@ -251,11 +285,26 @@ class LLMAdapter:
                                 result = tool.run(**args)
                             except Exception as e:
                                 result = f"Error: {e}"
+                        if tc_data["name"] in {"file_write", "edit"} and not str(
+                            result
+                        ).startswith("Error:"):
+                            mutated = True
                         if (
-                            tc_data["name"] in {"file_write", "edit"}
+                            tc_data["name"] == "edit"
+                            and "old_string not found" in str(result).lower()
+                        ):
+                            edit_recovery_required = True
+                            trajectory.emit(
+                                "edit_context_stale",
+                                round=rounds,
+                                file_path=str(args.get("file_path") or ""),
+                            )
+                        elif (
+                            edit_recovery_required
+                            and _is_observation_only_tool(tc_data["name"], args)
                             and not str(result).startswith("Error:")
                         ):
-                            mutated = True
+                            edit_recovery_required = False
                         if len(result) > 4000:
                             result = result[:4000] + "\n... (truncated)"
                         trajectory.emit(
@@ -281,17 +330,21 @@ class LLMAdapter:
                                 "termination_reason": "stuck",
                             }
                             return
-                        tool_results.append({
-                            "role": "tool",
-                            "tool_call_id": tc_data["id"],
-                            "content": str(result),
-                        })
+                        tool_results.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc_data["id"],
+                                "content": str(result),
+                            }
+                        )
                     else:
-                        tool_results.append({
-                            "role": "tool",
-                            "tool_call_id": tc_data["id"],
-                            "content": f"Error: unknown tool '{tc_data['name']}'",
-                        })
+                        tool_results.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc_data["id"],
+                                "content": f"Error: unknown tool '{tc_data['name']}'",
+                            }
+                        )
 
                 if tc_list:
                     assistant_msg["tool_calls"] = tc_list
@@ -305,22 +358,37 @@ class LLMAdapter:
                 ):
                     mutation_nudged = True
                     trajectory.emit("implementation_nudge", round=rounds)
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "Implementation checkpoint: no file has been changed yet. "
-                            "Stop broad repository analysis now. In the next response, "
-                            "batch-create or edit all production and test files required "
-                            "by the current slice. Do not run the full test suite."
-                        ),
-                    })
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Implementation checkpoint: no file has been changed yet. "
+                                "Stop broad repository analysis now. In the next response, "
+                                "batch-create or edit all production and test files required "
+                                "by the current slice. Do not run the full test suite."
+                            ),
+                        }
+                    )
+                if (
+                    implementation_deadline_round
+                    and rounds == implementation_deadline_round - 1
+                ):
+                    trajectory.emit("implementation_deadline", round=rounds + 1)
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Implementation deadline: stop reading, searching, auditing, "
+                                "and testing. Use the remaining rounds only to batch-write/edit "
+                                "the complete current-slice patch. Do not explain the plan again."
+                            ),
+                        }
+                    )
             else:
                 # no tool calls — model is done
                 text_content = "".join(content_parts).strip()
                 if text_content:
-                    trajectory.emit(
-                        "model_message", round=rounds, content=text_content
-                    )
+                    trajectory.emit("model_message", round=rounds, content=text_content)
                 trajectory.emit("loop_completed", rounds=rounds)
                 yield {
                     "type": "done",
@@ -329,12 +397,25 @@ class LLMAdapter:
                 }
                 return
 
-            # one round before limit: nudge model to produce output
+            # Reserve the last round for the outcome appropriate to this mode.
             if rounds == max_tool_rounds - 1:
-                messages.append({
-                    "role": "user",
-                    "content": "请基于已读取的文件，立即输出最终分析结果。不要再调用工具。",
-                })
+                if mutation_nudge_round > 0:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Last implementation round: perform all remaining edits now. "
+                                "Do not summarize or inspect more files; use write/edit tools."
+                            ),
+                        }
+                    )
+                else:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "请基于已读取的文件，立即输出最终分析结果。不要再调用工具。",
+                        }
+                    )
 
         # max rounds reached — ask for final output
         if rounds >= max_tool_rounds:
@@ -365,9 +446,7 @@ class LLMAdapter:
                 prompt += self.usage.prompt_tokens
                 completion += self.usage.completion_tokens
                 total += self.usage.total_tokens
-            self.usage = TokenUsage(
-                prompt, completion, total, self.usage.call_id
-            )
+            self.usage = TokenUsage(prompt, completion, total, self.usage.call_id)
 
     def reset_usage(self) -> None:
         self.usage = TokenUsage()
@@ -385,16 +464,48 @@ def _is_broad_pytest_command(command: str) -> bool:
             continue
         index = parts.index("pytest")
         targets = [
-            value for value in parts[index + 1:]
-            if not value.startswith("-")
-            and not _is_shell_redirection(value)
+            value
+            for value in parts[index + 1 :]
+            if not value.startswith("-") and not _is_shell_redirection(value)
         ]
         if not targets or all(
-            value.rstrip("/") in {".", "test", "tests"}
-            for value in targets
+            value.rstrip("/") in {".", "test", "tests"} for value in targets
         ):
             return True
     return False
+
+
+def _is_observation_only_tool(tool_name: str, args: dict[str, Any]) -> bool:
+    if tool_name in {"file_read", "file_list", "grep", "lint"}:
+        return True
+    if tool_name != "shell":
+        return False
+    command = str(args.get("command") or "").lower()
+    observation_markers = (
+        " cat ",
+        "cat -",
+        " sed ",
+        "sed -",
+        " grep ",
+        "grep -",
+        " find ",
+        "find ",
+        " ls ",
+        "ls ",
+        " wc ",
+        "wc -",
+        "git status",
+        "git log",
+        "git diff",
+        "git show",
+        "pytest",
+        "python -m pytest",
+        "python3 -m pytest",
+        "python -c",
+        "python3 -c",
+    )
+    padded = f" {command} "
+    return any(marker in padded for marker in observation_markers)
 
 
 def _is_shell_redirection(value: str) -> bool:
@@ -409,14 +520,16 @@ def _tools_to_openai_schema(tools: list) -> list[dict]:
     schemas = []
     for tool in tools:
         params_schema = _build_params_schema(tool)
-        schemas.append({
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": params_schema,
-            },
-        })
+        schemas.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": params_schema,
+                },
+            }
+        )
     return schemas
 
 
@@ -433,7 +546,9 @@ def _build_params_schema(tool) -> dict:
         if name == "self":
             continue
         type_map = {str: "string", int: "integer", float: "number", bool: "boolean"}
-        py_type = str if param.annotation is inspect.Parameter.empty else param.annotation
+        py_type = (
+            str if param.annotation is inspect.Parameter.empty else param.annotation
+        )
         json_type = type_map.get(py_type, "string")
         prop = {"type": json_type}
         if param.default is not inspect.Parameter.empty and param.default is not None:

@@ -12,7 +12,7 @@ _SAFE_GATE_PREFIXES = (
     ("pytest",), ("python", "-m", "pytest"), ("python3", "-m", "pytest"),
     ("python",), ("python3",), ("sqlite3",),
     ("bash",), ("sh",), ("cat",), ("head",), ("tail",),
-    ("ruff", "check"), ("mypy",), ("pyright",),
+    ("ruff", "check"), ("ruff", "format"), ("mypy",), ("pyright",),
     ("npm", "test"), ("npm", "run"), ("pnpm",), ("yarn",),
     ("go", "test"), ("go", "vet"), ("cargo", "test"),
     ("cargo", "clippy"), ("make",), ("./gradlew",), ("mvn",),

@@ -1,4 +1,5 @@
 """Autonomous single-writer Greenfield engineering orchestration."""
+
 from __future__ import annotations
 
 import ast
@@ -17,12 +18,19 @@ import yaml
 
 from onep.config import load_config
 from onep.greenfield.gates import (
-    GreenfieldGateRunner, discover_quality_commands, validate_gate_commands,
+    GreenfieldGateRunner,
+    discover_quality_commands,
+    validate_gate_commands,
 )
 from onep.greenfield.git_session import GreenfieldGitSession
 from onep.greenfield.models import (
-    AcceptanceContract, AcceptanceItem, GreenfieldOptions, GreenfieldRun,
-    GreenfieldStage, GreenfieldStatus, SlicePlan,
+    AcceptanceContract,
+    AcceptanceItem,
+    GreenfieldOptions,
+    GreenfieldRun,
+    GreenfieldStage,
+    GreenfieldStatus,
+    SlicePlan,
 )
 from onep.greenfield.recorder import GreenfieldRecorder
 from onep.llm.adapters import LLMAdapter
@@ -33,9 +41,12 @@ from onep.persistence.models import Project, ProjectStatus
 from onep.persistence.state import load_state, save_state
 from onep.strategy.gates import PatchScopeGate, validate_focused_test_commands
 from onep.strategy.models import StrategyItem
-from onep.strategy.optimize_engine import OptimizeEngine
+from onep.strategy.optimize_engine import EngineAttemptResult, OptimizeEngine
 from onep.strategy.repair import (
-    AttemptStagnationDetector, RepairBrief, previous_tool_actions,
+    AttemptStagnationDetector,
+    RepairBrief,
+    classify_failure,
+    previous_tool_actions,
 )
 from onep.strategy.reviewer import ReviewAgent
 
@@ -72,12 +83,17 @@ class GreenfieldBlocked(RuntimeError):
     """The run needs one user decision before it can continue safely."""
 
 
+class GreenfieldTransportError(RuntimeError):
+    """The model provider failed before producing any recoverable work."""
+
+
 class GreenfieldEngine:
     def __init__(self, console: Console | None = None, llm=None):
         self.console = console or Console()
         self.llm = llm or LLMAdapter()
         self.optimizer = OptimizeEngine()
         self.reviewer = ReviewAgent(self.llm)
+        self._diagnosis_cache: dict[str, str] = {}
 
     def run(
         self,
@@ -108,7 +124,16 @@ class GreenfieldEngine:
         session = None
         try:
             self._validate_budget_pricing(run.options)
-            session = GreenfieldGitSession(workspace, run.id)
+            recoverable_wip = None
+            if run.slices and run.current_slice < len(run.slices):
+                recoverable_wip = (
+                    run_dir / "slices" / run.slices[run.current_slice].id / "wip"
+                )
+            session = GreenfieldGitSession(
+                workspace,
+                run.id,
+                recoverable_wip=recoverable_wip,
+            )
             if run.run_branch:
                 session.resume(run.run_branch)
             else:
@@ -152,8 +177,15 @@ class GreenfieldEngine:
                         continue
                     run.current_slice = index
                     self._execute_slice(
-                        run, plan, contract, session, mandatory, gate_runner,
-                        recorder, tracker, detector,
+                        run,
+                        plan,
+                        contract,
+                        session,
+                        mandatory,
+                        gate_runner,
+                        recorder,
+                        tracker,
+                        detector,
                     )
                     mandatory = self._slice_gate_commands(workspace, run)
                     requirements_satisfied = False
@@ -162,7 +194,7 @@ class GreenfieldEngine:
                             run, contract, session, gate_runner, recorder, tracker
                         )
                     if requirements_satisfied:
-                        for remaining in run.slices[index + 1:]:
+                        for remaining in run.slices[index + 1 :]:
                             if remaining.status == "pending":
                                 remaining.status = "skipped_satisfied"
                                 recorder.save_slice(remaining)
@@ -209,13 +241,14 @@ class GreenfieldEngine:
         except Exception as exc:
             if session is not None:
                 session.rollback_attempt()
-            return self._fail(
-                project, run, recorder, self._failure_type(exc), str(exc)
-            )
+            return self._fail(project, run, recorder, self._failure_type(exc), str(exc))
 
     def _discover(
-        self, run: GreenfieldRun, workspace: Path,
-        recorder: GreenfieldRecorder, tracker: CostTracker,
+        self,
+        run: GreenfieldRun,
+        workspace: Path,
+        recorder: GreenfieldRecorder,
+        tracker: CostTracker,
     ) -> AcceptanceContract:
         run.stage = GreenfieldStage.DISCOVER
         recorder.trace("DISCOVER", "正在分析需求、仓库环境和可用技术栈")
@@ -245,16 +278,23 @@ class GreenfieldEngine:
             )
         else:
             raise GreenfieldBlocked("Requirement remains ambiguous after clarification")
-        contract = AcceptanceContract.from_dict({
-            "requirements": data.get("acceptance") or []
-        })
+        contract = AcceptanceContract.from_dict(
+            {"requirements": data.get("acceptance") or []}
+        )
         if not contract.items:
-            contract = AcceptanceContract([AcceptanceItem(
-                id="REQ-001", priority="P1", behavior=run.requirement,
-            )])
+            contract = AcceptanceContract(
+                [
+                    AcceptanceItem(
+                        id="REQ-001",
+                        priority="P1",
+                        behavior=run.requirement,
+                    )
+                ]
+            )
         architecture = data.get("architecture") or {
             "constraints": [run.requirement],
-            "candidates": [], "selected": "Engineer-selected minimal stack",
+            "candidates": [],
+            "selected": "Engineer-selected minimal stack",
             "rationale": "Satisfy the acceptance contract with minimal complexity",
             "consequences": [],
         }
@@ -269,22 +309,48 @@ class GreenfieldEngine:
         for plan in run.slices:
             recorder.save_slice(plan)
         recorder.trace(
-            "PLAN", f"已生成 {len(contract.items)} 个验收项和 {len(run.slices)} 个纵向切片"
+            "PLAN",
+            f"已生成 {len(contract.items)} 个验收项和 {len(run.slices)} 个纵向切片",
         )
         recorder.save_run()
         return contract
 
     def _execute_slice(
-        self, run: GreenfieldRun, plan: SlicePlan, contract: AcceptanceContract,
-        session: GreenfieldGitSession, mandatory: list[str],
-        gate_runner: GreenfieldGateRunner, recorder: GreenfieldRecorder,
-        tracker: CostTracker, detector: AttemptStagnationDetector,
+        self,
+        run: GreenfieldRun,
+        plan: SlicePlan,
+        contract: AcceptanceContract,
+        session: GreenfieldGitSession,
+        mandatory: list[str],
+        gate_runner: GreenfieldGateRunner,
+        recorder: GreenfieldRecorder,
+        tracker: CostTracker,
+        detector: AttemptStagnationDetector,
     ) -> None:
         feedback = ""
         last_events: tuple[dict, ...] = ()
         session.begin_attempt()
         restored = recorder.restore_wip(plan, session.workspace)
         if restored:
+            feedback = self._resume_feedback(recorder, plan) or (
+                "Recovered WIP from a previous interrupted run. Preserve it. Do not "
+                "re-read the whole repository. Compare only the current slice's expected "
+                "files with the worktree, complete missing files, and fix focused gate "
+                "failures in a single batch."
+            )
+            if "failure_type: test_failed" in feedback and re.search(
+                r"failing_command: .*\bpytest\b", feedback
+            ):
+                diagnosis = self._diagnose_test_failure(
+                    plan,
+                    session.diff(),
+                    feedback,
+                    session.workspace,
+                    recorder,
+                    tracker,
+                )
+                if diagnosis:
+                    feedback += "\n\nIndependent root-cause diagnosis:\n" + diagnosis
             recorder.trace(
                 "RECOVER",
                 f"已恢复上次失败前的 {len(restored)} 个 WIP 文件，继续实现而非从零开始",
@@ -295,7 +361,11 @@ class GreenfieldEngine:
             run.round_number += 1
             plan.attempts += 1
             run.stage = GreenfieldStage.REPAIR if repair else GreenfieldStage.IMPLEMENT
-            label = f"REPAIR {repair}/{run.options.max_repairs_per_slice}" if repair else "IMPLEMENT"
+            label = (
+                f"REPAIR {repair}/{run.options.max_repairs_per_slice}"
+                if repair
+                else "IMPLEMENT"
+            )
             recorder.trace(
                 f"SLICE {run.current_slice + 1}/{len(run.slices)}",
                 f"{label}: {plan.title}",
@@ -308,9 +378,12 @@ class GreenfieldEngine:
                 "blue",
             )
             item = StrategyItem(
-                id=plan.id, title=plan.title, file_location=",".join(plan.expected_files) or "N/A",
+                id=plan.id,
+                title=plan.title,
+                file_location=",".join(plan.expected_files) or "N/A",
                 summary=self._slice_prompt(run, plan, contract),
-                tags=["greenfield", "vertical-slice"], impact="medium",
+                tags=["greenfield", "vertical-slice"],
+                impact="medium",
                 expected_files=plan.expected_files,
             )
             item.summary += (
@@ -327,64 +400,146 @@ class GreenfieldEngine:
                 "Before using tools, briefly state the concrete implementation result you are "
                 "about to produce."
             )
-            recorder.begin_engineer_attempt()
-            try:
-                result = self.optimizer.execute_attempt(
-                    item, str(session.workspace), str(session.workspace), self.llm,
-                feedback=feedback,
-                event_sink=recorder.engineer_event,
-                verbose=run.options.verbose,
-                max_tool_rounds=16,
-                mutation_nudge_round=4,
-                block_full_test_commands=True,
+            if feedback:
+                item.summary = (
+                    "REPAIR MODE: Existing implementation is already present. Do not "
+                    "re-read the whole repository, recreate working files, or reassess "
+                    "the product. Act directly on the structured gate feedback below, "
+                    "inspect only the exact failing lines when necessary, and batch all "
+                    "fixes in the first edit round.\n\n"
+                    + feedback
+                    + "\n\n"
+                    + item.summary
                 )
-            except BaseException:
-                session.rollback_attempt()
-                raise
+            recorder.begin_engineer_attempt()
+            diff_before_attempt = session.diff()
+            repair_mode = bool(feedback) or repair > 0
+            transport_retries = 0
+            while True:
+                try:
+                    result = self.optimizer.execute_attempt(
+                        item,
+                        str(session.workspace),
+                        str(session.workspace),
+                        self.llm,
+                        feedback=feedback,
+                        event_sink=recorder.engineer_event,
+                        verbose=run.options.verbose,
+                        max_tool_rounds=18 if repair_mode else 20,
+                        mutation_nudge_round=2 if repair_mode else 4,
+                        block_full_test_commands=True,
+                    )
+                    break
+                except (KeyboardInterrupt, SystemExit):
+                    session.rollback_attempt()
+                    raise
+                except Exception as exc:
+                    transport_retries += 1
+                    interrupted_changes = session.changed_files()
+                    if interrupted_changes:
+                        recorder.save_wip(plan, interrupted_changes, session.workspace)
+                    retry_state = f"传输重试={transport_retries}/3; 当前修复不计数"
+                    recorder.failure(
+                        "RETRY",
+                        f"model_api_interrupted:{type(exc).__name__}",
+                        exc,
+                        context=f"切片={plan.id}; {retry_state}; "
+                        f"已保存WIP={len(interrupted_changes)}个文件",
+                    )
+                    if transport_retries >= 3:
+                        if interrupted_changes:
+                            recorder.trace(
+                                "VERIFY",
+                                "模型传输连续中断，但已产生实质代码；停止重复调用模型，"
+                                "改由 scope、聚焦测试和 Reviewer 判断当前 WIP",
+                                "yellow",
+                            )
+                            result = EngineAttemptResult(
+                                output=(
+                                    "Model transport interrupted after producing a "
+                                    "substantive patch; deterministic gates will assess WIP."
+                                ),
+                                termination_reason="transport_interrupted",
+                            )
+                            break
+                        session.rollback_attempt()
+                        raise GreenfieldTransportError(
+                            "Model/API transport failed after 3 retries without producing "
+                            "recoverable files. Resume with onep run."
+                        ) from exc
+                    feedback = (
+                        "The previous model/API stream was interrupted. Preserve all "
+                        "current WIP files and continue the exact pending edits. Do not "
+                        "restart analysis or re-read the repository."
+                    )
+            was_exception_retry = transport_retries > 0
             last_events = result.events
             self._track(tracker, "optimize_developer")
             changed = session.changed_files()
             diff = session.diff()
-            recorder.engineer_summary(
-                result.output, changed, result.termination_reason
-            )
+            recorder.engineer_summary(result.output, changed, result.termination_reason)
             failure_type = ""
             raw_error = ""
             failing_command = ""
-            if result.termination_reason != "completed":
+            recovered_wip_attempt = bool(restored) and repair == 0
+            if self._repair_made_no_progress(
+                repair_mode,
+                diff,
+                diff_before_attempt,
+                was_exception_retry,
+                recovered_wip_attempt,
+            ):
                 failure_type = "implementation_incomplete"
                 raw_error = (
-                    "Engineer implementation did not finish: "
-                    f"{result.termination_reason}. Continue from the existing changes "
-                    "before running external quality gates."
+                    "Repair attempt performed no file edits. Use the existing gate "
+                    "diagnostics and edit the failing files before requesting tests.\n"
+                    "Previous structured feedback:\n" + feedback
                 )
             elif not changed:
-                failure_type, raw_error = "no_changes", "Engineer produced no code changes"
-            elif plan.expected_files:
+                if result.termination_reason != "completed":
+                    failure_type = "implementation_incomplete"
+                    raw_error = (
+                        "Engineer implementation did not produce a patch before "
+                        f"termination: {result.termination_reason}."
+                    )
+                else:
+                    failure_type, raw_error = (
+                        "no_changes",
+                        "Engineer produced no code changes",
+                    )
+            elif plan.expected_files and not self._is_cross_cutting_hardening(plan):
                 candidate = self._scope_candidate(item, plan, contract)
                 self._expand_scope_from_local_imports(
                     candidate, changed, session.workspace
                 )
                 self._expand_scope_for_tests(candidate, changed)
-                scope = PatchScopeGate().check(
-                    candidate, changed
-                )
+                self._expand_scope_for_declared_packages(candidate, changed)
+                self._expand_scope_for_declared_directories(candidate, changed)
+                scope = PatchScopeGate().check(candidate, changed)
                 if not scope.passed:
                     failure_type, raw_error = "scope_violation", scope.feedback
 
             tests = None
             if not failure_type:
+                if result.termination_reason != "completed":
+                    recorder.trace(
+                        "VERIFY",
+                        "模型未输出完成结论，但已产生实质代码；改由聚焦测试和 Reviewer 判断是否完成",
+                        "yellow",
+                    )
                 run.stage = GreenfieldStage.VERIFY_SLICE
                 focused = self._fast_slice_commands(plan.focused_commands)
-                all_mandatory = list(dict.fromkeys([
-                    *discover_quality_commands(session.workspace), *mandatory,
-                ]))
+                all_mandatory = list(
+                    dict.fromkeys(
+                        [
+                            *discover_quality_commands(session.workspace),
+                            *mandatory,
+                        ]
+                    )
+                )
                 current_mandatory = all_mandatory
                 if focused:
-                    current_mandatory = [
-                        command for command in all_mandatory
-                        if not self._is_broad_test_command(command)
-                    ]
+                    current_mandatory = self._dedupe_slice_gates(focused, all_mandatory)
                 recorder.trace(
                     "TEST",
                     f"实现已完成，执行 {len(focused) + len(current_mandatory)} 个快速质量闸门；"
@@ -400,37 +555,105 @@ class GreenfieldEngine:
                     for command in tests.commands:
                         status = "passed" if command.passed else "failed"
                         recorder.trace(
-                            "TEST", f"{command.command}: {status} ({command.duration_seconds:.1f}s)",
+                            "TEST",
+                            f"{command.command}: {status} ({command.duration_seconds:.1f}s)",
                             "green" if command.passed else "yellow",
                         )
                     if not tests.passed:
                         failed = next(cmd for cmd in tests.commands if not cmd.passed)
-                        failure_type = "test_failed"
-                        failing_command = failed.command
-                        raw_error = failed.stdout + "\n" + failed.stderr
+                        if failed.command.startswith("ruff check"):
+                            python_targets = [
+                                path
+                                for path in changed
+                                if path.endswith(".py")
+                                and (session.workspace / path).is_file()
+                            ]
+                            if python_targets:
+                                targets = shlex.join(python_targets)
+                                recorder.trace(
+                                    "FORMAT",
+                                    f"Ruff 门禁失败，仅自动修复本切片的 "
+                                    f"{len(python_targets)} 个 Python 文件后重试",
+                                    "yellow",
+                                )
+                                gate_runner.run(
+                                    session.workspace,
+                                    [f"ruff check {targets} --fix"],
+                                    [],
+                                )
+                                gate_runner.run(
+                                    session.workspace,
+                                    [f"ruff format {targets}"],
+                                    [],
+                                )
+                                tests = gate_runner.run(
+                                    session.workspace, focused, current_mandatory
+                                )
+                                if tests.passed:
+                                    recorder.trace(
+                                        "FORMAT", "自动修复后质量闸门已通过", "green"
+                                    )
+                                    failed = None
+                                else:
+                                    failed = next(
+                                        cmd for cmd in tests.commands if not cmd.passed
+                                    )
+                        if failed is not None:
+                            failure_type = "test_failed"
+                            failing_command = failed.command
+                            raw_error = failed.stdout + "\n" + failed.stderr
+                            diagnosis = ""
+                            if self._is_pytest_command(failing_command):
+                                diagnosis = self._diagnose_test_failure(
+                                    plan,
+                                    diff,
+                                    raw_error,
+                                    session.workspace,
+                                    recorder,
+                                    tracker,
+                                )
+                            if diagnosis:
+                                raw_error += (
+                                    "\nIndependent root-cause diagnosis:\n" + diagnosis
+                                )
 
             review = None
             if not failure_type:
                 run.stage = GreenfieldStage.REVIEW
                 recorder.trace("REVIEW", "只读 Reviewer 正在检查逻辑、架构和回归风险")
                 review = self.reviewer.review(
-                    plan.objective, diff, self._test_summary(tests),
+                    plan.objective,
+                    diff,
+                    self._test_summary(tests),
                     self._repository_summary(session.workspace),
                 )
                 self._track(tracker, "code_reviewer")
                 recorder.save_review(plan, review.to_dict())
-                if not review.passed:
+                blocking_findings = self._credible_review_findings(review, tests)
+                if not review.passed and blocking_findings:
                     failure_type = "review_failed"
-                    raw_error = "\n".join(review.findings) or review.summary
+                    raw_error = "\n".join(blocking_findings)
+                elif not review.passed:
+                    recorder.trace(
+                        "REVIEW",
+                        "已忽略与实际通过测试直接矛盾的 Reviewer 推测",
+                        "yellow",
+                    )
 
-            recorder.save_attempt(plan, plan.attempts, {
-                "changed_files": changed,
-                "test_results": [cmd.to_dict() for cmd in tests.commands] if tests else [],
-                "review": review.to_dict() if review else None,
-                "failure_type": failure_type,
-                "failure_detail": raw_error,
-                "trajectory": list(result.events),
-            })
+            recorder.save_attempt(
+                plan,
+                plan.attempts,
+                {
+                    "changed_files": changed,
+                    "test_results": [cmd.to_dict() for cmd in tests.commands]
+                    if tests
+                    else [],
+                    "review": review.to_dict() if review else None,
+                    "failure_type": failure_type,
+                    "failure_detail": raw_error,
+                    "trajectory": list(result.events),
+                },
+            )
             if failure_type:
                 recorder.save_wip(plan, changed, session.workspace)
             if not failure_type:
@@ -441,15 +664,33 @@ class GreenfieldEngine:
                 recorder.save_slice(plan)
                 self._mark_acceptance(contract, plan, current_mandatory)
                 recorder.save_contract(contract)
-                recorder.trace("SLICE", f"{plan.title} 已通过并提交 {plan.commit_sha[:8]}", "green")
+                recorder.trace(
+                    "SLICE", f"{plan.title} 已通过并提交 {plan.commit_sha[:8]}", "green"
+                )
                 recorder.save_run()
                 return
 
             brief = RepairBrief.build(
-                failure_type, raw_error, changed, diff,
-                previous_tool_actions(last_events), failing_command,
+                failure_type,
+                raw_error,
+                changed,
+                diff,
+                previous_tool_actions(last_events),
+                failing_command,
             )
             recorder.event("repair_brief", brief.to_dict())
+            attempt_label = (
+                "实现"
+                if repair == 0
+                else f"修复{repair}/{run.options.max_repairs_per_slice}"
+            )
+            recorder.failure(
+                "REPAIR",
+                brief.failure_type,
+                brief.primary_error,
+                context=f"切片={plan.id}; 当前尝试={attempt_label}; "
+                f"命令={brief.failing_command or 'n/a'}",
+            )
             if detector.observe(brief):
                 session.rollback_attempt()
                 raise RuntimeError(
@@ -457,31 +698,243 @@ class GreenfieldEngine:
                     + brief.primary_error
                 )
             feedback = brief.to_prompt()
-            recorder.trace("REPAIR", f"{brief.failure_type}: {brief.primary_error[:240]}", "yellow")
             if repair >= run.options.max_repairs_per_slice:
+                if changed:
+                    recorder.trace(
+                        "WIP",
+                        f"已保存 {len(changed)} 个未完成文件；下次 onep run 会自动恢复并继续",
+                        "yellow",
+                    )
                 session.rollback_attempt()
                 raise RuntimeError(
                     f"Repair attempts exhausted for {plan.id}: {brief.primary_error}"
                 )
         raise RuntimeError(f"Slice did not converge: {plan.id}")
 
+    @staticmethod
+    def _repair_made_no_progress(
+        repair_mode: bool,
+        diff: str,
+        diff_before_attempt: str,
+        was_exception_retry: bool,
+        recovered_wip_attempt: bool,
+    ) -> bool:
+        """A restored WIP may already contain the complete fix and needs gates."""
+        return (
+            repair_mode
+            and diff == diff_before_attempt
+            and not was_exception_retry
+            and not recovered_wip_attempt
+        )
+
+    @staticmethod
+    def _is_cross_cutting_hardening(plan: SlicePlan) -> bool:
+        return plan.id.startswith(
+            (
+                "final-regression-hardening",
+                "final-architecture-hardening",
+                "deployment-hardening",
+            )
+        )
+
+    @staticmethod
+    def _credible_review_findings(review, tests) -> list[str]:
+        findings = list(review.findings)
+        if not tests or not tests.passed:
+            return findings or [review.summary]
+        contradiction = re.compile(
+            r"(?:\btest\w*\b.*\bexpects?\b.*\bbut\b|"
+            r"\b(?:test|assertion)\b.*\b(?:will|would) fail\b)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        credible = [
+            finding for finding in findings if not contradiction.search(finding)
+        ]
+        if credible:
+            return credible
+        if not findings or review.summary == "invalid reviewer output":
+            return [review.summary]
+        return []
+
+    @staticmethod
+    def _resume_feedback(
+        recorder: GreenfieldRecorder,
+        plan: SlicePlan,
+    ) -> str:
+        attempts = sorted(
+            (recorder.run_dir / "slices" / plan.id / "attempts").glob("*.yaml")
+        )
+        if not attempts:
+            return ""
+        data = {}
+        for attempt in reversed(attempts):
+            try:
+                candidate = yaml.safe_load(attempt.read_text()) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+            data = candidate
+            if candidate.get("failure_type") != "implementation_incomplete":
+                break
+        failure_type = str(data.get("failure_type") or "")
+        detail = str(data.get("failure_detail") or "")
+        if not failure_type or not detail:
+            return ""
+        failing_command = ""
+        for result in data.get("test_results") or []:
+            if int(result.get("exit_code") or 0) != 0:
+                failing_command = str(result.get("command") or "")
+                break
+        brief = RepairBrief.build(
+            failure_type,
+            detail,
+            list(data.get("changed_files") or []),
+            "",
+            failing_command=failing_command,
+        )
+        return (
+            "Recovered WIP from an interrupted run. Preserve it and continue from "
+            "the last gate failure without re-reading the whole repository.\n"
+            + brief.to_prompt()
+        )
+
+    def _diagnose_test_failure(
+        self,
+        plan: SlicePlan,
+        diff: str,
+        failure: str,
+        workspace: Path,
+        recorder: GreenfieldRecorder,
+        tracker: CostTracker,
+    ) -> str:
+        category = classify_failure(failure)
+        deterministic = {
+            "collection_conflict": (
+                "Python 测试模块与同名测试包发生导入冲突；统一为单一包布局，"
+                "将顶层测试移动到包内 test_exports.py，并删除同名模块。"
+            ),
+            "no_tests_collected": (
+                "pytest 未收集到测试；创建可发现的 test_*.py 文件和 test_* 函数，"
+                "并先运行 pytest --collect-only 验证测试拓扑。"
+            ),
+            "missing_path": (
+                "质量门禁引用的文件不存在；实现该声明文件，或将 Plan/命令改为"
+                "真实入口路径后再运行门禁。"
+            ),
+            "fixture_mismatch": (
+                "测试夹具与当前生产逻辑或测试输入不一致；修正夹具数据和对应断言，"
+                "不要回退已确认正确的生产逻辑。"
+            ),
+            "interface_mismatch": (
+                "调用方、CLI 或导入接口与实现签名不一致；同步入口参数、导出符号"
+                "及其测试。"
+            ),
+        }
+        if category in deterministic:
+            diagnosis = deterministic[category]
+            recorder.trace(
+                "DIAGNOSE",
+                f"确定性失败分类={category}；{diagnosis}",
+                "yellow",
+            )
+            return diagnosis
+        cache_key = hashlib.sha256(
+            f"{plan.id}\n{category}\n{failure}".encode("utf-8")
+        ).hexdigest()
+        if cache_key in self._diagnosis_cache:
+            recorder.trace("DIAGNOSE", "复用相同失败的既有根因诊断", "blue")
+            return self._diagnosis_cache[cache_key]
+        recorder.trace("DIAGNOSE", "独立 Reviewer 正在定位测试失败的数据流根因", "blue")
+        review = self.reviewer.review(
+            "Diagnose the root cause of the failing tests for this slice. Do not "
+            "merely repeat assertions. Identify the production data-flow defect and "
+            f"state concrete file-level fixes. Slice objective: {plan.objective}",
+            diff,
+            failure,
+            self._repository_summary(workspace),
+        )
+        self._track(tracker, "code_reviewer")
+        details = list(review.findings)
+        if review.summary and review.summary != "invalid reviewer output":
+            details.append(review.summary)
+        diagnosis = "\n".join(dict.fromkeys(details))
+        if diagnosis:
+            self._diagnosis_cache[cache_key] = diagnosis
+            recorder.trace("DIAGNOSE", recorder._brief(diagnosis, 500), "yellow")
+        return diagnosis
+
     def _final_verify(
-        self, run: GreenfieldRun, contract: AcceptanceContract,
-        session: GreenfieldGitSession, mandatory: list[str],
-        gate_runner: GreenfieldGateRunner, recorder: GreenfieldRecorder,
-        tracker: CostTracker, allow_repair: bool = True,
+        self,
+        run: GreenfieldRun,
+        contract: AcceptanceContract,
+        session: GreenfieldGitSession,
+        mandatory: list[str],
+        gate_runner: GreenfieldGateRunner,
+        recorder: GreenfieldRecorder,
+        tracker: CostTracker,
+        allow_repair: bool = True,
     ) -> None:
         run.stage = GreenfieldStage.FULL_VERIFY
         if not mandatory:
-            raise RuntimeError("No mandatory quality gate discovered; pass --test-command")
+            raise RuntimeError(
+                "No mandatory quality gate discovered; pass --test-command"
+            )
         recorder.trace("FULL_VERIFY", "正在执行完整回归质量闸门")
         result = gate_runner.run(session.workspace, [], mandatory)
         if not result.passed:
             failed = next(cmd for cmd in result.commands if not cmd.passed)
-            raise RuntimeError(
-                f"Full verification failed: {failed.command}: "
-                f"{(failed.stdout + failed.stderr)[-1500:]}"
+            raw_failure = failed.stdout + "\n" + failed.stderr
+            brief = RepairBrief.build(
+                "test_failed",
+                raw_failure,
+                [],
+                session.repo.git.diff(run.base_commit, "HEAD"),
+                failing_command=failed.command,
             )
+            recorder.failure(
+                "FULL_VERIFY",
+                "test_failed",
+                brief.primary_error,
+                context=f"命令={failed.command}; exit_code={failed.exit_code}",
+            )
+            if (
+                allow_repair
+                and self._hardening_count(run, "final-regression-hardening") < 4
+            ):
+                plan = self._final_test_repair_plan(run, failed, brief.primary_error)
+                run.slices.append(plan)
+                run.current_slice = len(run.slices) - 1
+                recorder.save_slice(plan)
+                self._execute_slice(
+                    run,
+                    plan,
+                    contract,
+                    session,
+                    mandatory,
+                    gate_runner,
+                    recorder,
+                    tracker,
+                    AttemptStagnationDetector(3),
+                )
+                refreshed = list(
+                    dict.fromkeys(
+                        [*discover_quality_commands(session.workspace), *mandatory]
+                    )
+                )
+                return self._final_verify(
+                    run,
+                    contract,
+                    session,
+                    refreshed,
+                    gate_runner,
+                    recorder,
+                    tracker,
+                    allow_repair=True,
+                )
+            raise RuntimeError(
+                f"Full verification failed: {failed.command}: {raw_failure[-1500:]}"
+            )
+        self._mark_final_acceptance(contract, result)
+        recorder.save_contract(contract)
         if not contract.required_complete:
             raise RuntimeError(
                 "P0/P1 acceptance items lack passing executable evidence"
@@ -489,35 +942,69 @@ class GreenfieldEngine:
         run.stage = GreenfieldStage.ARCHITECTURE_REVIEW
         full_diff = session.repo.git.diff(run.base_commit, "HEAD")
         review = self.reviewer.review(
-            "Final architecture and acceptance review", full_diff,
-            self._test_summary(result), self._repository_summary(session.workspace),
+            "Final architecture and acceptance review. Treat these as blocking: "
+            "a user-visible configuration field that is parsed but never consumed; "
+            "a claimed pipeline stage whose output is discarded; scheduling or "
+            "automation requirements without an executable mechanism; tests that "
+            "only prove files exist instead of required output semantics; or an "
+            "operational entry point that cannot run the product end to end.",
+            full_diff,
+            self._test_summary(result),
+            self._repository_summary(session.workspace),
         )
         self._track(tracker, "code_reviewer")
         if not review.passed:
             detail = "; ".join(review.findings) or review.summary
-            if allow_repair:
+            recorder.failure(
+                "ARCHITECTURE_REVIEW",
+                "blocking_finding",
+                detail,
+                context=f"已创建架构修复={self._hardening_count(run, 'final-architecture-hardening')}/4",
+            )
+            if (
+                allow_repair
+                and self._hardening_count(run, "final-architecture-hardening") < 4
+            ):
                 plan = SlicePlan(
-                    id="final-architecture-hardening",
+                    id=self._next_hardening_id(run, "final-architecture-hardening"),
                     title="Final architecture hardening",
                     objective=(
-                        "Resolve every blocking final architecture finding: "
-                        + detail
+                        "Resolve every blocking final architecture finding: " + detail
                     ),
-                    acceptance_ids=[], expected_files=[],
+                    acceptance_ids=[],
+                    expected_files=[],
                 )
                 run.slices.append(plan)
                 run.current_slice = len(run.slices) - 1
                 recorder.save_slice(plan)
                 self._execute_slice(
-                    run, plan, contract, session, mandatory, gate_runner,
-                    recorder, tracker, AttemptStagnationDetector(3),
+                    run,
+                    plan,
+                    contract,
+                    session,
+                    mandatory,
+                    gate_runner,
+                    recorder,
+                    tracker,
+                    AttemptStagnationDetector(3),
                 )
-                refreshed = list(dict.fromkeys([
-                    *discover_quality_commands(session.workspace), *mandatory,
-                ]))
+                refreshed = list(
+                    dict.fromkeys(
+                        [
+                            *discover_quality_commands(session.workspace),
+                            *mandatory,
+                        ]
+                    )
+                )
                 return self._final_verify(
-                    run, contract, session, refreshed, gate_runner,
-                    recorder, tracker, allow_repair=False,
+                    run,
+                    contract,
+                    session,
+                    refreshed,
+                    gate_runner,
+                    recorder,
+                    tracker,
+                    allow_repair=True,
                 )
             raise RuntimeError("Final architecture review failed: " + detail)
         run.stage = GreenfieldStage.DEPLOY_VERIFY
@@ -525,33 +1012,97 @@ class GreenfieldEngine:
         deploy = gate_runner.deploy(session.workspace, run.options.deploy_mode)
         if deploy is not None and not deploy.passed:
             failed = next(cmd for cmd in deploy.commands if not cmd.passed)
-            if allow_repair:
+            recorder.failure(
+                "DEPLOY_VERIFY",
+                "deployment_failed",
+                failed.stdout + "\n" + failed.stderr,
+                context=f"命令={failed.command}",
+            )
+            if allow_repair and self._hardening_count(run, "deployment-hardening") < 4:
                 plan = SlicePlan(
-                    id="deployment-hardening",
+                    id=self._next_hardening_id(run, "deployment-hardening"),
                     title="Deployment hardening",
                     objective=(
                         f"Fix deployment verification failure for {failed.command}: "
                         + (failed.stdout + failed.stderr)[-1500:]
                     ),
-                    acceptance_ids=[], expected_files=[],
+                    acceptance_ids=[],
+                    expected_files=[],
                 )
                 run.slices.append(plan)
                 run.current_slice = len(run.slices) - 1
                 recorder.save_slice(plan)
                 self._execute_slice(
-                    run, plan, contract, session, mandatory, gate_runner,
-                    recorder, tracker, AttemptStagnationDetector(3),
+                    run,
+                    plan,
+                    contract,
+                    session,
+                    mandatory,
+                    gate_runner,
+                    recorder,
+                    tracker,
+                    AttemptStagnationDetector(3),
                 )
                 return self._final_verify(
-                    run, contract, session, mandatory, gate_runner,
-                    recorder, tracker, allow_repair=False,
+                    run,
+                    contract,
+                    session,
+                    mandatory,
+                    gate_runner,
+                    recorder,
+                    tracker,
+                    allow_repair=True,
                 )
             raise RuntimeError(f"Deployment verification failed: {failed.command}")
 
+    @staticmethod
+    def _final_test_repair_plan(
+        run: GreenfieldRun, failed, diagnostic: str
+    ) -> SlicePlan:
+        base_id = "final-regression-hardening"
+        existing = {plan.id for plan in run.slices}
+        plan_id = base_id
+        suffix = 2
+        while plan_id in existing:
+            plan_id = f"{base_id}-{suffix}"
+            suffix += 1
+        return SlicePlan(
+            id=plan_id,
+            title="Final regression hardening",
+            objective=(
+                f"Fix every failure and error reported by the final regression command "
+                f"`{failed.command}`. Root-cause evidence: {diagnostic}. Preserve all "
+                "completed product behavior. Do not weaken, delete, skip, or rewrite valid "
+                "assertions merely to make tests pass. Batch the production and fixture "
+                "fixes, then run the focused command."
+            ),
+            acceptance_ids=[],
+            expected_files=[],
+            focused_commands=[failed.command],
+        )
+
+    @staticmethod
+    def _hardening_count(run: GreenfieldRun, prefix: str) -> int:
+        return sum(plan.id.startswith(prefix) for plan in run.slices)
+
+    @staticmethod
+    def _next_hardening_id(run: GreenfieldRun, base_id: str) -> str:
+        existing = {plan.id for plan in run.slices}
+        if base_id not in existing:
+            return base_id
+        suffix = 2
+        while f"{base_id}-{suffix}" in existing:
+            suffix += 1
+        return f"{base_id}-{suffix}"
+
     def _requirements_satisfied(
-        self, run: GreenfieldRun, contract: AcceptanceContract,
-        session: GreenfieldGitSession, gate_runner: GreenfieldGateRunner,
-        recorder: GreenfieldRecorder, tracker: CostTracker,
+        self,
+        run: GreenfieldRun,
+        contract: AcceptanceContract,
+        session: GreenfieldGitSession,
+        gate_runner: GreenfieldGateRunner,
+        recorder: GreenfieldRecorder,
+        tracker: CostTracker,
     ) -> bool:
         """Check whether the repository already satisfies the complete requirement."""
         commands = self._final_gate_commands(session.workspace, run, contract)
@@ -578,10 +1129,7 @@ class GreenfieldEngine:
             elif previous:
                 message = f"本轮代码变化未减少验收前置项，仍缺少 {len(missing)} 项"
             else:
-                message = (
-                    "完整需求尚未具备验收条件，缺少: "
-                    + ", ".join(missing[:8])
-                )
+                message = "完整需求尚未具备验收条件，缺少: " + ", ".join(missing[:8])
             recorder.trace("ASSESS", message, "yellow")
             self._save_assessment(run, recorder, fingerprint, missing, False)
             return False
@@ -593,19 +1141,20 @@ class GreenfieldEngine:
             return False
         if not result.passed:
             failed = next(command for command in result.commands if not command.passed)
-            recorder.trace(
-                "ASSESS", f"完整需求尚未满足: {failed.command}", "yellow"
-            )
+            recorder.trace("ASSESS", f"完整需求尚未满足: {failed.command}", "yellow")
             self._save_assessment(run, recorder, fingerprint, [], False)
             return False
         acceptance = "\n".join(
-            f"- {item.id} [{item.priority}]: {item.behavior}"
-            for item in contract.items
+            f"- {item.id} [{item.priority}]: {item.behavior}" for item in contract.items
         )
         full_diff = session.repo.git.diff(run.base_commit, "HEAD")
         review = self.reviewer.review(
             "Determine whether the complete repository satisfies the original "
-            f"product requirement:\n{run.requirement}\n\nAcceptance contract:\n{acceptance}",
+            f"product requirement:\n{run.requirement}\n\nAcceptance contract:\n{acceptance}"
+            "\n\nPerform semantic data-flow checks, not just test-result checks. Reject "
+            "parsed-but-unused functional configuration, discarded outputs from "
+            "claimed pipeline stages, and scheduling/automation claims that have "
+            "no executable mechanism.",
             full_diff,
             self._test_summary(result),
             self._repository_summary(session.workspace),
@@ -613,9 +1162,7 @@ class GreenfieldEngine:
         self._track(tracker, "code_reviewer")
         recorder.event("requirement_assessment", review.to_dict())
         if not review.passed:
-            recorder.trace(
-                "ASSESS", "完整需求评审仍有阻塞项", "yellow"
-            )
+            recorder.trace("ASSESS", "完整需求评审仍有阻塞项", "yellow")
             self._save_assessment(run, recorder, fingerprint, [], False)
             return False
         evidence = "full-requirement-assessment:gates-and-review-passed"
@@ -632,8 +1179,11 @@ class GreenfieldEngine:
 
     @staticmethod
     def _save_assessment(
-        run: GreenfieldRun, recorder: GreenfieldRecorder,
-        fingerprint: str, missing: list[str], satisfied: bool,
+        run: GreenfieldRun,
+        recorder: GreenfieldRecorder,
+        fingerprint: str,
+        missing: list[str],
+        satisfied: bool,
     ) -> None:
         run.last_assessment_fingerprint = fingerprint
         run.last_assessment_missing = list(missing)
@@ -642,34 +1192,44 @@ class GreenfieldEngine:
 
     @staticmethod
     def _assessment_fingerprint(
-        session: GreenfieldGitSession, commands: list[str],
+        session: GreenfieldGitSession,
+        commands: list[str],
         contract: AcceptanceContract,
     ) -> str:
         payload = {
             "head": session.repo.head.commit.hexsha,
-            "status": session.repo.git.status("--porcelain"),
+            "status": "\n".join(
+                line
+                for line in session.repo.git.status("--porcelain").splitlines()
+                if not GreenfieldEngine._status_line_is_runtime(line)
+            ),
             "commands": commands,
             "required": [
                 (item.id, item.priority, item.status)
-                for item in contract.items if item.priority in {"P0", "P1"}
+                for item in contract.items
+                if item.priority in {"P0", "P1"}
             ],
         }
-        encoded = json.dumps(
-            payload, ensure_ascii=False, sort_keys=True
-        ).encode("utf-8")
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode(
+            "utf-8"
+        )
         return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
     def _write_completion_docs(
-        run: GreenfieldRun, contract: AcceptanceContract,
-        workspace: Path, commands: list[str],
+        run: GreenfieldRun,
+        contract: AcceptanceContract,
+        workspace: Path,
+        commands: list[str],
     ) -> str:
         workspace = Path(workspace)
         source_files = sorted(
             path.relative_to(workspace)
             for path in workspace.rglob("*")
             if path.is_file()
-            and not any(part.startswith(".") for part in path.relative_to(workspace).parts)
+            and not any(
+                part.startswith(".") for part in path.relative_to(workspace).parts
+            )
             and path.relative_to(workspace).parts[0] not in {"node_modules", "output"}
         )
         modules = []
@@ -680,22 +1240,21 @@ class GreenfieldEngine:
             if relative.suffix == ".py":
                 try:
                     tree = ast.parse((workspace / relative).read_text(errors="replace"))
-                    description = (ast.get_docstring(tree) or description).splitlines()[0]
+                    description = (ast.get_docstring(tree) or description).splitlines()[
+                        0
+                    ]
                 except (OSError, SyntaxError):
                     pass
             modules.append((relative.as_posix(), description))
         features = "\n".join(f"- {item.behavior}" for item in contract.items)
-        structure = "\n".join(
-            f"- `{path}` — {description}" for path, description in modules[:100]
-        ) or "- See the repository source files."
-        verification = "\n".join(f"- `{command}`" for command in commands)
-        usage = next(
-            (
-                command for command in commands
-                if not command.startswith(("pytest", "ruff", "mypy", "pyright"))
-            ),
-            "See `docs/CODE_GUIDE.md` for project entry points.",
+        structure = (
+            "\n".join(
+                f"- `{path}` — {description}" for path, description in modules[:100]
+            )
+            or "- See the repository source files."
         )
+        verification = "\n".join(f"- `{command}`" for command in commands)
+        usage = GreenfieldEngine._infer_usage_command(workspace, commands)
         if (workspace / "requirements.txt").exists():
             install = "python -m pip install -r requirements.txt"
         elif (workspace / "pyproject.toml").exists():
@@ -704,12 +1263,21 @@ class GreenfieldEngine:
             install = "npm install"
         else:
             install = "No additional installation step was detected."
+        scheduling = ""
+        if any(term in run.requirement.lower() for term in ("weekly", "每周", "按周")):
+            scheduling = (
+                "\n## Weekly scheduling\n\nRun the usage command from your preferred "
+                "scheduler. For example, this cron entry runs every Monday at 09:00 "
+                "(replace the workspace path if the project is moved):\n\n"
+                f"```cron\n0 9 * * 1 cd {workspace} && {usage}\n```\n"
+            )
         readme = (
             f"# {run.project_name}\n\n"
             f"## Overview\n\n{run.requirement}\n\n"
             f"## Features\n\n{features}\n\n"
             f"## Installation\n\n```bash\n{install}\n```\n\n"
             f"## Usage\n\n```bash\n{usage}\n```\n\n"
+            f"{scheduling}\n"
             f"## Verification\n\n{verification}\n\n"
             "## Documentation\n\nSee [docs/CODE_GUIDE.md](docs/CODE_GUIDE.md) "
             "and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).\n"
@@ -737,6 +1305,43 @@ class GreenfieldEngine:
         )
 
     @staticmethod
+    def _infer_usage_command(workspace: Path, commands: list[str]) -> str:
+        """Choose a product entry point, never a test/quality-gate command."""
+        quality_tokens = ("pytest", "ruff", "mypy", "pyright", " test", "tests/")
+        for command in commands:
+            lowered = " " + command.lower()
+            if not any(token in lowered for token in quality_tokens):
+                return command
+
+        candidates = []
+        for path in Path(workspace).rglob("*.py"):
+            relative = path.relative_to(workspace)
+            if any(part.startswith(".") for part in relative.parts):
+                continue
+            if "tests" in relative.parts or path.name.startswith("test_"):
+                continue
+            try:
+                content = path.read_text(errors="replace")
+            except OSError:
+                continue
+            if "if __name__" not in content or "__main__" not in content:
+                continue
+            module = ".".join(relative.with_suffix("").parts)
+            priority = next(
+                (
+                    index
+                    for index, name in enumerate(("cli", "main", "pipeline", "app"))
+                    if relative.stem == name
+                ),
+                10,
+            )
+            candidates.append((priority, len(relative.parts), module))
+        if candidates:
+            module = min(candidates)[2]
+            return f"python -m {module}"
+        return "See `docs/CODE_GUIDE.md` for project entry points."
+
+    @staticmethod
     def _commit_completion_docs(session: GreenfieldGitSession) -> str:
         paths = ["README.md", "docs/CODE_GUIDE.md"]
         status = session.repo.git.status("--porcelain", "--", *paths)
@@ -748,11 +1353,16 @@ class GreenfieldEngine:
         ).hexsha
 
     def _fail(
-        self, project: Project, run: GreenfieldRun,
-        recorder: GreenfieldRecorder, reason: str, detail: str,
+        self,
+        project: Project,
+        run: GreenfieldRun,
+        recorder: GreenfieldRecorder,
+        reason: str,
+        detail: str,
     ) -> bool:
         run.status = (
-            GreenfieldStatus.CANCELLED if reason == "cancelled"
+            GreenfieldStatus.CANCELLED
+            if reason == "cancelled"
             else GreenfieldStatus.FAILED
         )
         run.failure_reason = reason
@@ -775,8 +1385,11 @@ class GreenfieldEngine:
         return False
 
     def _block(
-        self, project: Project, run: GreenfieldRun,
-        recorder: GreenfieldRecorder, question: str,
+        self,
+        project: Project,
+        run: GreenfieldRun,
+        recorder: GreenfieldRecorder,
+        question: str,
     ) -> bool:
         run.status = GreenfieldStatus.BLOCKED
         run.blocked_question = question
@@ -851,23 +1464,49 @@ class GreenfieldEngine:
     def _fallback_slices(contract: AcceptanceContract) -> list[dict]:
         ids = [item.id for item in contract.items]
         return [
-            {"id": "foundation", "title": "Runnable foundation", "objective": "Create the smallest runnable architecture and test harness", "acceptance_ids": [], "expected_files": [], "focused_commands": []},
-            {"id": "core", "title": "Core product behavior", "objective": "Implement all required user-visible behavior", "acceptance_ids": ids, "expected_files": [], "focused_commands": []},
-            {"id": "hardening", "title": "Safety and operational hardening", "objective": "Add edge cases, errors, observability, and deployment support", "acceptance_ids": ids, "expected_files": [], "focused_commands": []},
+            {
+                "id": "foundation",
+                "title": "Runnable foundation",
+                "objective": "Create the smallest runnable architecture and test harness",
+                "acceptance_ids": [],
+                "expected_files": [],
+                "focused_commands": [],
+            },
+            {
+                "id": "core",
+                "title": "Core product behavior",
+                "objective": "Implement all required user-visible behavior",
+                "acceptance_ids": ids,
+                "expected_files": [],
+                "focused_commands": [],
+            },
+            {
+                "id": "hardening",
+                "title": "Safety and operational hardening",
+                "objective": "Add edge cases, errors, observability, and deployment support",
+                "acceptance_ids": ids,
+                "expected_files": [],
+                "focused_commands": [],
+            },
         ]
 
     @staticmethod
     def _write_design_docs(
-        workspace: Path, run: GreenfieldRun, contract: AcceptanceContract,
+        workspace: Path,
+        run: GreenfieldRun,
+        contract: AcceptanceContract,
         architecture: dict,
     ) -> None:
         docs = workspace / "docs"
         docs.mkdir(exist_ok=True)
         acceptance_lines = "\n\n".join(
             f"### {item.id} [{item.priority}]\n\n{item.behavior}\n\n"
-            + ("Verification:\n" + "\n".join(
-                f"- `{command}`" for command in item.commands
-            ) if item.commands else "Verification: reviewer evidence and project quality gates")
+            + (
+                "Verification:\n"
+                + "\n".join(f"- `{command}`" for command in item.commands)
+                if item.commands
+                else "Verification: reviewer evidence and project quality gates"
+            )
             for item in contract.items
         )
         (docs / "PRD.md").write_text(
@@ -889,19 +1528,19 @@ class GreenfieldEngine:
         for index, plan in enumerate(run.slices, 1):
             acceptance = ", ".join(plan.acceptance_ids) or "architecture/support"
             files = "\n".join(f"- `{value}`" for value in plan.expected_files)
-            fast_commands = GreenfieldEngine._fast_slice_commands(
-                plan.focused_commands
-            )
+            fast_commands = GreenfieldEngine._fast_slice_commands(plan.focused_commands)
             deferred_commands = [
-                command for command in plan.focused_commands
+                command
+                for command in plan.focused_commands
                 if command not in fast_commands
             ]
-            fast = "\n".join(
-                f"- `{command}`" for command in fast_commands
-            ) or "- Project mandatory test gates (for example `pytest -q`)"
-            deferred = "\n".join(
-                f"- `{command}`" for command in deferred_commands
-            ) or "- None"
+            fast = (
+                "\n".join(f"- `{command}`" for command in fast_commands)
+                or "- Project mandatory test gates (for example `pytest -q`)"
+            )
+            deferred = (
+                "\n".join(f"- `{command}`" for command in deferred_commands) or "- None"
+            )
             plan_sections.append(
                 f"## Slice {index}: {plan.title}\n\n"
                 f"**Objective:** {plan.objective}\n\n"
@@ -927,7 +1566,8 @@ class GreenfieldEngine:
     @staticmethod
     def _commit_design_docs(session: GreenfieldGitSession) -> str:
         paths = [
-            "docs/PRD.md", "docs/ARCHITECTURE.md",
+            "docs/PRD.md",
+            "docs/ARCHITECTURE.md",
             "docs/IMPLEMENTATION_PLAN.md",
         ]
         status = session.repo.git.status("--porcelain", "--", *paths)
@@ -940,11 +1580,12 @@ class GreenfieldEngine:
 
     @staticmethod
     def _slice_prompt(
-        run: GreenfieldRun, plan: SlicePlan, contract: AcceptanceContract,
+        run: GreenfieldRun,
+        plan: SlicePlan,
+        contract: AcceptanceContract,
     ) -> str:
         acceptance = [
-            item.to_dict() for item in contract.items
-            if item.id in plan.acceptance_ids
+            item.to_dict() for item in contract.items if item.id in plan.acceptance_ids
         ]
         return (
             f"Product requirement: {run.requirement}\n"
@@ -957,10 +1598,12 @@ class GreenfieldEngine:
 
     @staticmethod
     def _scope_candidate(
-        item: StrategyItem, plan: SlicePlan,
+        item: StrategyItem,
+        plan: SlicePlan,
         contract: AcceptanceContract | None = None,
     ):
         from onep.strategy.optimize_models import PlanCandidate
+
         files = {Path(value) for value in plan.expected_files}
         commands = list(plan.focused_commands)
         if contract is not None:
@@ -970,28 +1613,41 @@ class GreenfieldEngine:
                 if acceptance.id in plan.acceptance_ids
                 for command in acceptance.commands
             )
-        module_roots = {
-            path.parts[0] for path in files if len(path.parts) > 1
-        }
+        module_roots = {path.parts[0] for path in files if len(path.parts) > 1}
         files.update(GreenfieldEngine._command_paths(commands, module_roots))
         for path in tuple(files):
             for parent in path.parents:
                 if str(parent) == ".":
                     break
                 files.add(parent / "__init__.py")
-        files.update(Path(value) for value in (
-            "requirements.txt", "pyproject.toml", "setup.cfg", "pytest.ini",
-            "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
-            "go.mod", "go.sum", "Cargo.toml", "Cargo.lock",
-        ))
+        files.update(
+            Path(value)
+            for value in (
+                "requirements.txt",
+                "pyproject.toml",
+                "setup.cfg",
+                "pytest.ini",
+                "package.json",
+                "package-lock.json",
+                "pnpm-lock.yaml",
+                "yarn.lock",
+                "go.mod",
+                "go.sum",
+                "Cargo.toml",
+                "Cargo.lock",
+            )
+        )
         return PlanCandidate(
-            id=item.id, title=item.title, summary=item.summary,
+            id=item.id,
+            title=item.title,
+            summary=item.summary,
             files=files,
         )
 
     @staticmethod
     def _command_paths(
-        commands: list[str], module_roots: set[str] | None = None,
+        commands: list[str],
+        module_roots: set[str] | None = None,
     ) -> set[Path]:
         paths: set[Path] = set()
         module_roots = module_roots or set()
@@ -1001,14 +1657,26 @@ class GreenfieldEngine:
             except ValueError:
                 continue
             for value in parts[1:]:
+                # A pytest node id identifies a test inside a file. Only the path
+                # before ``::`` participates in plan/scope validation.
+                value = value.split("::", 1)[0]
                 if (
-                    not value or value.startswith("-") or "://" in value
-                    or value.startswith("/") or ".." in Path(value).parts
+                    not value
+                    or value.startswith("-")
+                    or "://" in value
+                    or value.startswith("/")
+                    or ".." in Path(value).parts
                 ):
                     continue
                 path = Path(value)
                 if "/" in value or path.suffix in {
-                    ".py", ".json", ".yaml", ".yml", ".db", ".md", ".sh",
+                    ".py",
+                    ".json",
+                    ".yaml",
+                    ".yml",
+                    ".db",
+                    ".md",
+                    ".sh",
                 }:
                     paths.add(path)
                 for module in re.findall(
@@ -1016,12 +1684,12 @@ class GreenfieldEngine:
                     value,
                 ):
                     if module.split(".", 1)[0] in module_roots:
-                        paths.add(
-                            Path(*module.split(".")).with_suffix(".py")
-                        )
+                        paths.add(Path(*module.split(".")).with_suffix(".py"))
             if (
-                len(parts) > 1 and parts[0] in {"python", "python3"}
-                and not parts[1].startswith("-") and "/" in parts[1]
+                len(parts) > 1
+                and parts[0] in {"python", "python3"}
+                and not parts[1].startswith("-")
+                and "/" in parts[1]
                 and Path(parts[1]).suffix == ""
             ):
                 paths.discard(Path(parts[1]))
@@ -1030,14 +1698,15 @@ class GreenfieldEngine:
 
     @staticmethod
     def _expand_scope_from_local_imports(
-        candidate, changed_files: list[str], workspace: Path,
+        candidate,
+        changed_files: list[str],
+        workspace: Path,
     ) -> None:
         """Allow local Python modules imported by already-declared changed files."""
         workspace = Path(workspace)
         changed = {Path(value) for value in changed_files}
         pending = [
-            path for path in changed
-            if path in candidate.files and path.suffix == ".py"
+            path for path in changed if path in candidate.files and path.suffix == ".py"
         ]
         visited: set[Path] = set()
         while pending:
@@ -1055,9 +1724,7 @@ class GreenfieldEngine:
             imports: list[Path] = []
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
-                    imports.extend(
-                        Path(*alias.name.split(".")) for alias in node.names
-                    )
+                    imports.extend(Path(*alias.name.split(".")) for alias in node.names)
                 elif isinstance(node, ast.ImportFrom):
                     if node.level:
                         anchor = source.parent
@@ -1094,7 +1761,7 @@ class GreenfieldEngine:
             is_test = path.suffix == ".py" and (
                 path.name.startswith("test_") or path.name == "conftest.py"
             )
-            is_fixture = path.suffix in {".json", ".yaml", ".yml", ".toml", ".txt"}
+            is_fixture = "fixtures" in path.parts
             if not (is_test or is_fixture or path.name == "__init__.py"):
                 continue
             candidate.files.add(path)
@@ -1104,19 +1771,62 @@ class GreenfieldEngine:
                 candidate.files.add(parent / "__init__.py")
 
     @staticmethod
+    def _expand_scope_for_declared_directories(
+        candidate,
+        changed_files: list[str],
+    ) -> None:
+        """A declared directory authorizes files created below that exact subtree."""
+        declared = {
+            path
+            for path in candidate.files
+            if path.parts and path.suffix == "" and path.name != "__init__"
+        }
+        for value in changed_files:
+            path = Path(value)
+            if any(directory in path.parents for directory in declared):
+                candidate.files.add(path)
+
+    @staticmethod
+    def _expand_scope_for_declared_packages(
+        candidate,
+        changed_files: list[str],
+    ) -> None:
+        """Allow Python siblings inside packages explicitly declared by the Plan."""
+        package_dirs = {
+            path.parent
+            for path in candidate.files
+            if path.name == "__init__.py"
+            and path.parts
+            and path.parts[0] not in {"test", "tests"}
+        }
+        for value in changed_files:
+            path = Path(value)
+            if path.suffix == ".py" and path.parent in package_dirs:
+                candidate.files.add(path)
+
+    @staticmethod
     def _sanitize_generated_commands(
-        run: GreenfieldRun, contract: AcceptanceContract,
+        run: GreenfieldRun,
+        contract: AcceptanceContract,
         recorder: GreenfieldRecorder,
     ) -> None:
         def safe(commands: list[str]) -> list[str]:
             accepted = []
+            rejected = []
             for command in commands:
                 try:
                     validate_gate_commands([command])
                 except ValueError as exc:
-                    recorder.trace("PLAN", f"忽略不安全的生成命令: {exc}", "yellow")
+                    rejected.append(str(exc))
                 else:
                     accepted.append(command)
+            if rejected:
+                examples = "; ".join(rejected[:3])
+                recorder.trace(
+                    "PLAN",
+                    f"忽略 {len(rejected)} 个不安全或不支持的生成命令: {examples}",
+                    "yellow",
+                )
             return list(dict.fromkeys(accepted))
 
         for plan in run.slices:
@@ -1134,56 +1844,145 @@ class GreenfieldEngine:
         except ValueError:
             return command
         if (
-            len(parts) >= 2 and parts[0] in {"python", "python3"}
-            and not parts[1].startswith("-") and "/" in parts[1]
+            len(parts) >= 2
+            and parts[0] in {"python", "python3"}
+            and not parts[1].startswith("-")
+            and "/" in parts[1]
             and Path(parts[1]).suffix == ""
         ):
             parts[1] += ".py"
             return shlex.join(parts)
         return command
 
+    @staticmethod
+    def _normalize_declared_path(value: str) -> str:
+        """Normalize harmless model annotations without guessing a new path."""
+        value = str(value).strip().split("::", 1)[0]
+        return re.sub(
+            r"\s+\((?:new|updated|modified|created)\)\s*$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        ).strip()
+
+    @classmethod
+    def _resolve_test_layout_conflicts(
+        cls,
+        files: set[Path],
+    ) -> tuple[set[Path], list[tuple[Path, Path]]]:
+        """Avoid Python modules and packages that resolve to the same import name."""
+        resolved = set(files)
+        rewrites: list[tuple[Path, Path]] = []
+        for path in sorted(files):
+            if (
+                path.suffix != ".py"
+                or not path.parts
+                or path.parts[0]
+                not in {
+                    "test",
+                    "tests",
+                }
+            ):
+                continue
+            package = path.with_suffix("")
+            if not any(other != path and package in other.parents for other in files):
+                continue
+            replacement = package / "test_exports.py"
+            resolved.discard(path)
+            resolved.add(replacement)
+            rewrites.append((path, replacement))
+        return resolved, rewrites
+
     @classmethod
     def _normalize_slice_plans(
-        cls, run: GreenfieldRun, contract: AcceptanceContract,
+        cls,
+        run: GreenfieldRun,
+        contract: AcceptanceContract,
         recorder: GreenfieldRecorder,
     ) -> None:
         for item in contract.items:
-            item.commands = [cls._normalize_python_command(cmd) for cmd in item.commands]
+            item.commands = [
+                cls._normalize_python_command(cmd) for cmd in item.commands
+            ]
         for plan in run.slices:
+            normalized_expected = [
+                cls._normalize_declared_path(value) for value in plan.expected_files
+            ]
+            plan.expected_files = [value for value in normalized_expected if value]
             plan.focused_commands = [
                 cls._normalize_python_command(cmd) for cmd in plan.focused_commands
             ]
+            if not plan.focused_commands:
+                declared_tests = sorted(
+                    value
+                    for value in plan.expected_files
+                    if Path(value).suffix == ".py"
+                    and Path(value).name.startswith("test_")
+                    and Path(value).parts
+                    and Path(value).parts[0] in {"test", "tests"}
+                )
+                if declared_tests:
+                    plan.focused_commands = [
+                        "python -m pytest "
+                        + " ".join(shlex.quote(value) for value in declared_tests)
+                        + " -q"
+                    ]
             commands = list(plan.focused_commands)
             commands.extend(
-                command for item in contract.items
-                if item.id in plan.acceptance_ids for command in item.commands
+                command
+                for item in contract.items
+                if item.id in plan.acceptance_ids
+                for command in item.commands
             )
             files = {Path(value) for value in plan.expected_files}
             roots = {path.parts[0] for path in files if len(path.parts) > 1}
             files.update(cls._command_paths(commands, roots))
             runtime_outputs = cls._runtime_output_paths(commands)
             files = {
-                path for path in files
+                path
+                for path in files
                 if path not in runtime_outputs and not cls._is_runtime_artifact(path)
             }
+            files, rewrites = cls._resolve_test_layout_conflicts(files)
+            for original, replacement in rewrites:
+                recorder.trace(
+                    "PLAN_CHECK",
+                    f"测试模块/包同名冲突，已将 {original} 调整为 {replacement}",
+                    "yellow",
+                )
             production = [
-                path for path in files
-                if path.suffix == ".py" and path.parts[0] not in {"test", "tests"}
+                path
+                for path in files
+                if path.suffix == ".py"
+                and path.parts[0] not in {"test", "tests"}
                 and path.name != "__init__.py"
             ]
-            test_files = set()
-            collector_files = [path for path in production if "collectors" in path.parts]
-            if collector_files:
-                test_files.add(Path("tests/test_collectors.py"))
-            for path in production:
-                if "collectors" not in path.parts:
-                    test_files.add(Path("tests") / f"test_{path.stem}.py")
+            declared_tests = {
+                path
+                for path in files
+                if path.suffix == ".py"
+                and path.parts
+                and path.parts[0] in {"test", "tests"}
+                and path.name.startswith("test_")
+            }
+            test_files = (
+                {Path("tests") / f"test_{path.stem}.py" for path in production}
+                if not declared_tests
+                else set()
+            )
             if any(
                 command.startswith(("pytest", "python -m pytest", "python3 -m pytest"))
                 for command in run.options.test_commands
             ):
                 files.update(test_files)
                 files.add(Path("tests/__init__.py"))
+            files, rewrites = cls._resolve_test_layout_conflicts(files)
+            for original, replacement in rewrites:
+                recorder.trace(
+                    "PLAN_CHECK",
+                    f"测试模块/包同名冲突，已将 {original} 调整为 {replacement}",
+                    "yellow",
+                )
             plan.expected_files = sorted(path.as_posix() for path in files)
             recorder.save_slice(plan)
         recorder.save_contract(contract)
@@ -1202,7 +2001,9 @@ class GreenfieldEngine:
 
     @classmethod
     def _missing_command_paths(
-        cls, commands: list[str], workspace: Path,
+        cls,
+        commands: list[str],
+        workspace: Path,
     ) -> list[str]:
         paths = cls._required_command_paths(commands)
         missing = []
@@ -1215,8 +2016,15 @@ class GreenfieldEngine:
         return missing
 
     _OUTPUT_FLAGS = {
-        "--output", "-o", "--out", "--output-dir", "--out-dir",
-        "--report-dir", "--destination", "--dest",
+        "--output",
+        "-o",
+        "--out",
+        "--output-dir",
+        "--out-dir",
+        "--report-dir",
+        "--destination",
+        "--dest",
+        "--store",
     }
 
     @classmethod
@@ -1230,8 +2038,8 @@ class GreenfieldEngine:
             for value in parts:
                 for flag in cls._OUTPUT_FLAGS:
                     prefix = flag + "="
-                    if value.startswith(prefix) and value[len(prefix):]:
-                        outputs.add(Path(value[len(prefix):]))
+                    if value.startswith(prefix) and value[len(prefix) :]:
+                        outputs.add(Path(value[len(prefix) :]))
             for index, value in enumerate(parts[:-1]):
                 if value in cls._OUTPUT_FLAGS:
                     candidate = parts[index + 1]
@@ -1241,9 +2049,35 @@ class GreenfieldEngine:
 
     @staticmethod
     def _is_runtime_artifact(path: Path) -> bool:
-        return bool(path.parts) and path.parts[0] in {
-            "tmp", "temp", ".tmp", ".cache"
+        if not path.parts:
+            return False
+        runtime_roots = {
+            "tmp",
+            "temp",
+            ".tmp",
+            ".cache",
+            "cache",
+            "output",
+            "outputs",
+            "log",
+            "logs",
+            ".coverage",
+            "coverage",
+            "htmlcov",
         }
+        name = path.name.lower()
+        return path.parts[0].lower() in runtime_roots or name.endswith(
+            (".log", ".db", ".db-wal", ".db-shm", ".db-journal")
+        )
+
+    @classmethod
+    def _status_line_is_runtime(cls, line: str) -> bool:
+        if len(line) < 4:
+            return False
+        values = line[3:].split(" -> ")
+        return bool(values) and all(
+            cls._is_runtime_artifact(Path(value)) for value in values
+        )
 
     @classmethod
     def _required_command_paths(cls, commands: list[str]) -> set[Path]:
@@ -1262,41 +2096,129 @@ class GreenfieldEngine:
         else:
             return False
         targets = [
-            value for value in args
+            value
+            for value in args
             if not value.startswith("-")
             and not re.fullmatch(r"\d*(?:>|<|>>|<<)&?\d*", value)
         ]
         return not targets or all(
-            value.rstrip("/") in {".", "test", "tests"}
-            for value in targets
+            value.rstrip("/") in {".", "test", "tests"} for value in targets
+        )
+
+    @staticmethod
+    def _is_test_command(command: str) -> bool:
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            return False
+        return bool(
+            parts
+            and (
+                parts[0] == "pytest"
+                or parts[:3]
+                in (["python", "-m", "pytest"], ["python3", "-m", "pytest"])
+                or parts[:2] in (["npm", "test"], ["go", "test"], ["cargo", "test"])
+                or parts[:3] in (["npm", "run", "test"],)
+                or (parts[0] in {"pnpm", "yarn"} and "test" in parts[1:])
+                or (
+                    parts[0] == "./gradlew"
+                    and any("test" in value.lower() for value in parts[1:])
+                )
+                or parts[:2] == ["mvn", "test"]
+            )
+        )
+
+    @classmethod
+    def _dedupe_slice_gates(
+        cls,
+        focused: list[str],
+        mandatory: list[str],
+    ) -> list[str]:
+        """Do not execute equivalent test suites twice in one slice attempt."""
+        if not focused:
+            return list(mandatory)
+        focused_runs_full_suite = any(
+            cls._is_broad_test_command(cmd) for cmd in focused
+        )
+        return [
+            command
+            for command in mandatory
+            if not (
+                cls._is_test_command(command)
+                if focused_runs_full_suite
+                else cls._is_broad_test_command(command)
+            )
+        ]
+
+    @staticmethod
+    def _is_pytest_command(command: str) -> bool:
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            return False
+        return bool(parts) and (
+            parts[0] == "pytest"
+            or parts[:3] in (["python", "-m", "pytest"], ["python3", "-m", "pytest"])
         )
 
     @staticmethod
     def _slice_gate_commands(workspace: Path, run: GreenfieldRun) -> list[str]:
-        return list(dict.fromkeys([
-            *discover_quality_commands(workspace), *run.options.test_commands,
-        ]))
+        return list(
+            dict.fromkeys(
+                [
+                    *discover_quality_commands(workspace),
+                    *run.options.test_commands,
+                ]
+            )
+        )
 
     @staticmethod
     def _final_gate_commands(
-        workspace: Path, run: GreenfieldRun, contract: AcceptanceContract,
+        workspace: Path,
+        run: GreenfieldRun,
+        contract: AcceptanceContract,
     ) -> list[str]:
-        return list(dict.fromkeys([
-            *discover_quality_commands(workspace),
-            *(command for item in contract.items for command in item.commands),
-            *(command for plan in run.slices for command in plan.focused_commands),
-            *run.options.test_commands,
-        ]))
+        return list(
+            dict.fromkeys(
+                [
+                    *discover_quality_commands(workspace),
+                    *(command for item in contract.items for command in item.commands),
+                    *(
+                        command
+                        for plan in run.slices
+                        for command in plan.focused_commands
+                    ),
+                    *run.options.test_commands,
+                ]
+            )
+        )
 
     @staticmethod
     def _mark_acceptance(
-        contract: AcceptanceContract, plan: SlicePlan, commands: list[str],
+        contract: AcceptanceContract,
+        plan: SlicePlan,
+        commands: list[str],
     ) -> None:
         for item in contract.items:
             if item.id in plan.acceptance_ids:
                 item.status = "passed"
                 item.commands = list(dict.fromkeys([*item.commands, *commands]))
                 item.evidence.append(f"slice:{plan.id}:gates-passed")
+
+    @staticmethod
+    def _mark_final_acceptance(contract: AcceptanceContract, result) -> None:
+        passed_commands = {
+            command.command for command in result.commands if command.passed
+        }
+        for item in contract.items:
+            if item.priority not in {"P0", "P1"} or not item.commands:
+                continue
+            if not set(item.commands).issubset(passed_commands):
+                continue
+            item.status = "passed"
+            evidence = "final-verification:declared-commands-passed"
+            if evidence not in item.evidence:
+                item.evidence.append(evidence)
 
     @staticmethod
     def _test_summary(result) -> str:
@@ -1331,15 +2253,21 @@ class GreenfieldEngine:
             )
 
     def _check_budget_rounds(
-        self, run: GreenfieldRun, tracker: CostTracker,
+        self,
+        run: GreenfieldRun,
+        tracker: CostTracker,
     ) -> None:
         if run.round_number - self._round_start >= run.options.max_rounds:
-            raise RuntimeError(f"Maximum engineering rounds reached: {run.options.max_rounds}")
+            raise RuntimeError(
+                f"Maximum engineering rounds reached: {run.options.max_rounds}"
+            )
         if not tracker.can_continue():
             raise RuntimeError(f"Cost budget exhausted: {tracker.summary()}")
 
     @staticmethod
     def _failure_type(exc: Exception) -> str:
+        if isinstance(exc, GreenfieldTransportError):
+            return "model_api_interrupted"
         value = str(exc).lower()
         if "dirty" in value or "detached" in value or "bare" in value:
             return "git_safety"

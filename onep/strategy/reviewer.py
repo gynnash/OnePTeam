@@ -1,4 +1,5 @@
 """Independent, tool-free review of an Optimize Plan diff."""
+
 from __future__ import annotations
 
 import json
@@ -11,7 +12,9 @@ REVIEW_SYSTEM = """You are an independent code reviewer. You have no tools and
 must review only the supplied Plan, diff, tests, and project context. Return
 JSON only: {"passed": boolean, "blocking_issues": [{"file": string,
 "line": integer|null, "message": string}], "summary": string}. A malformed or
-uncertain response is blocking."""
+uncertain response is blocking. Never claim that a named passing test would fail;
+unchanged production context may be outside the diff. Block only on defects directly
+evidenced by supplied code or on missing behavior that the passing tests do not cover."""
 
 
 class ReviewAgent:
@@ -43,11 +46,13 @@ class ReviewAgent:
             for issue in issues:
                 if not isinstance(issue, dict) or not issue.get("message"):
                     raise ValueError("invalid blocking issue")
-                blocking_issues.append({
-                    "file": str(issue.get("file") or "?"),
-                    "line": issue.get("line"),
-                    "message": str(issue["message"]),
-                })
+                blocking_issues.append(
+                    {
+                        "file": str(issue.get("file") or "?"),
+                        "line": issue.get("line"),
+                        "message": str(issue["message"]),
+                    }
+                )
             passed = data["passed"] and not blocking_issues
             return ReviewResult(
                 passed=passed,
@@ -58,9 +63,11 @@ class ReviewAgent:
             return ReviewResult(
                 passed=False,
                 summary="invalid reviewer output",
-                blocking_issues=[{
-                    "file": "?",
-                    "line": None,
-                    "message": "Reviewer did not return valid structured JSON.",
-                }],
+                blocking_issues=[
+                    {
+                        "file": "?",
+                        "line": None,
+                        "message": "Reviewer did not return valid structured JSON.",
+                    }
+                ],
             )
