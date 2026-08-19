@@ -1,4 +1,5 @@
 """Research stage data models: architecture cards, evidence, tradeoffs."""
+
 from __future__ import annotations
 
 import json

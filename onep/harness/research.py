@@ -1,4 +1,5 @@
 """RESEARCH stage: open-source architecture research with degradation."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -72,7 +73,8 @@ Draft architecture:
 Return JSON only:
 {{"evidence": [{{"claim": "...", "source_repos": [], "detail": "..."}}],
 "tradeoffs": [{{"option": "...", "decision": "adopt|reject|consider",
-"reason": "...", "source_repos": []}}]}}"""
+"reason": "...", "source_repos": []}}]}}
+The DESIGN stage will cite this in-repository evidence as source_repo="local"."""
 
 
 def _str_list(value: Any) -> list[str]:
@@ -121,9 +123,7 @@ class ResearchStage:
         resolved = self._resolve_mode(mode, iteration)
         try:
             if resolved == "full":
-                report = self._full(
-                    goal, acceptance_summary, architecture_summary
-                )
+                report = self._full(goal, acceptance_summary, architecture_summary)
             else:
                 report = self._lightweight(
                     goal, acceptance_summary, architecture_summary
@@ -151,11 +151,9 @@ class ResearchStage:
             stage_name="harness_researcher",
         )
         questions = _str_list(_json_object(output or "").get("questions"))
-        questions = [q for q in questions if q.strip()][:self.max_questions]
+        questions = [q for q in questions if q.strip()][: self.max_questions]
         if not questions:
-            return ResearchReport(
-                mode="skipped", skip_reason="no_research_questions"
-            )
+            return ResearchReport(mode="skipped", skip_reason="no_research_questions")
         repos = []
         for question in questions:
             repos.extend(self.client.search_repos(question))
@@ -166,13 +164,9 @@ class ResearchStage:
             )
         cards = self._extract_cards(questions, repos)
         if cards is None:
-            return ResearchReport(
-                mode="skipped", skip_reason="readme_fetch_failed"
-            )
+            return ResearchReport(mode="skipped", skip_reason="readme_fetch_failed")
         if not cards:
-            return ResearchReport(
-                mode="skipped", skip_reason="no_architecture_cards"
-            )
+            return ResearchReport(mode="skipped", skip_reason="no_architecture_cards")
         synthesis = self.llm.invoke(
             system_prompt=RESEARCH_SYSTEM,
             user_prompt=SYNTHESIS_PROMPT.format(
@@ -187,7 +181,8 @@ class ResearchStage:
             EvidenceCard(
                 claim=str(entry.get("claim") or ""),
                 source_repos=[
-                    repo for repo in _str_list(entry.get("source_repos"))
+                    repo
+                    for repo in _str_list(entry.get("source_repos"))
                     if repo.lower() in researched
                 ],
                 detail=str(entry.get("detail") or ""),
@@ -200,20 +195,26 @@ class ResearchStage:
                 option=str(entry.get("option") or ""),
                 decision=str(entry.get("decision") or ""),
                 reason=str(entry.get("reason") or ""),
-                source_repos=_str_list(entry.get("source_repos")),
+                source_repos=[
+                    repo
+                    for repo in _str_list(entry.get("source_repos"))
+                    if repo.lower() in researched
+                ],
             )
             for entry in data.get("tradeoffs") or []
             if isinstance(entry, dict) and entry.get("option")
         ]
         return ResearchReport(
-            questions=questions, cards=cards, evidence=evidence,
-            tradeoffs=tradeoffs, mode="full",
+            questions=questions,
+            cards=cards,
+            evidence=evidence,
+            tradeoffs=tradeoffs,
+            mode="full",
         )
 
-    def _extract_cards(
-        self, questions, repos
-    ) -> list[ArchitectureCard] | None:
+    def _extract_cards(self, questions, repos) -> list[ArchitectureCard] | None:
         listings = []
+        repositories = {repo.full_name.lower(): repo for repo in repos}
         for repo in repos:
             try:
                 readme = self.client.fetch_readme(repo.full_name)
@@ -224,14 +225,31 @@ class ResearchStage:
                 tree = self.client.fetch_top_tree(repo.full_name)
             except Exception:
                 pass
-            listings.append({
-                "full_name": repo.full_name,
-                "stars": repo.stargazers_count,
-                "language": repo.language,
-                "description": repo.description,
-                "tree": tree,
-                "readme": readme,
-            })
+            source_files = {}
+            fetch_file = getattr(self.client, "fetch_file", None)
+            if fetch_file is not None:
+                likely_sources = [
+                    path
+                    for path in tree
+                    if Path(path).suffix.lower()
+                    in {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java"}
+                ][:5]
+                for path in likely_sources:
+                    try:
+                        source_files[path] = fetch_file(repo.full_name, path)
+                    except Exception:
+                        continue
+            listings.append(
+                {
+                    "full_name": repo.full_name,
+                    "stars": repo.stargazers_count,
+                    "language": repo.language,
+                    "description": repo.description,
+                    "tree": tree,
+                    "readme": readme,
+                    "source_files": source_files,
+                }
+            )
         if not listings:
             return None  # every README fetch failed
         output = self.llm.invoke(
@@ -244,15 +262,44 @@ class ResearchStage:
         for entry in data.get("cards") or []:
             if not isinstance(entry, dict) or not entry.get("repo"):
                 continue
-            cards.append(ArchitectureCard(
-                repo=str(entry["repo"]),
-                pattern=str(entry.get("pattern") or ""),
-                module_boundaries=_str_list(entry.get("module_boundaries")),
-                data_flow=str(entry.get("data_flow") or ""),
-                evidence_files=_str_list(entry.get("evidence_files")),
-                strengths=_str_list(entry.get("strengths")),
-                weaknesses=_str_list(entry.get("weaknesses")),
-            ))
+            repo_name = str(entry["repo"])
+            repo = repositories.get(repo_name.lower())
+            listing = next(
+                (
+                    value
+                    for value in listings
+                    if str(value.get("full_name") or "").lower() == repo_name.lower()
+                ),
+                None,
+            )
+            if repo is None or listing is None:
+                continue
+            known_paths = {str(path) for path in listing.get("tree") or []}
+            grounded_paths = {str(path) for path in (listing.get("source_files") or {})}
+            if listing.get("readme"):
+                known_paths.add("README.md")
+                grounded_paths.add("README.md")
+            allowed_paths = grounded_paths or known_paths
+            evidence_files = [
+                path
+                for path in _str_list(entry.get("evidence_files"))
+                if path in allowed_paths
+            ]
+            if allowed_paths and not evidence_files:
+                continue
+            cards.append(
+                ArchitectureCard(
+                    repo=repo.full_name,
+                    stars=repo.stargazers_count,
+                    language=repo.language,
+                    pattern=str(entry.get("pattern") or ""),
+                    module_boundaries=_str_list(entry.get("module_boundaries")),
+                    data_flow=str(entry.get("data_flow") or ""),
+                    evidence_files=evidence_files,
+                    strengths=_str_list(entry.get("strengths")),
+                    weaknesses=_str_list(entry.get("weaknesses")),
+                )
+            )
         return cards
 
     def _lightweight(
@@ -278,19 +325,19 @@ class ResearchStage:
             if isinstance(entry, dict) and entry.get("claim")
         ]
         if not evidence:
-            return ResearchReport(
-                mode="skipped", skip_reason="lightweight_no_evidence"
-            )
+            return ResearchReport(mode="skipped", skip_reason="lightweight_no_evidence")
         return ResearchReport(evidence=evidence, mode="lightweight")
 
     @staticmethod
     def _render_listings(listings: list[dict]) -> str:
         import json
+
         return json.dumps(listings, ensure_ascii=False, indent=2)
 
     @staticmethod
     def _render_cards(cards: list[ArchitectureCard]) -> str:
         import json
+
         return json.dumps(
             [card.to_dict() for card in cards], ensure_ascii=False, indent=2
         )

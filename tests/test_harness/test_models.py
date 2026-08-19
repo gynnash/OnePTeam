@@ -56,6 +56,15 @@ def test_candidate_adapter_round_trip():
     assert back.fingerprint == "fp-1"
 
 
+def test_candidate_adapter_computes_missing_fingerprint():
+    candidate = PlanCandidate(
+        id="plan-2", title="Fix cache invalidation", summary="stale reads",
+        files={Path("cache.py")},
+    )
+    item = CandidateAdapter.to_work_item(candidate)
+    assert item.fingerprint
+
+
 def test_candidate_to_slice_generates_iteration_ids():
     candidate = ImprovementCandidate(
         id="I-001", title="Add CLI", description="expose VALUE via CLI",

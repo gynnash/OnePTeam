@@ -4,6 +4,7 @@ Spec §5.2: Score = 0.30V + 0.20Q + 0.15R + 0.15E - 0.10C - 0.10Risk,
 normalized by the positive weight sum (0.80) so Score in [-0.25, 1.0].
 Score > 0.75 -> backlog; 0.5-0.75 -> candidate pool; < 0.5 -> reject.
 """
+
 from __future__ import annotations
 
 from typing import Any, Callable
@@ -12,17 +13,19 @@ from onep.harness.discover import _json_object
 from onep.harness.models import ImprovementCandidate
 
 SCORE_WEIGHTS = {
-    "V": 0.30,     # user value
-    "Q": 0.20,     # quality gain
-    "R": 0.15,     # relevance to original goal
-    "E": 0.15,     # learning value
-    "C": 0.10,     # cost
+    "V": 0.30,  # user value
+    "Q": 0.20,  # quality gain
+    "R": 0.15,  # relevance to original goal
+    "E": 0.15,  # learning value
+    "C": 0.10,  # cost
     "Risk": 0.10,  # complexity risk
 }
 POSITIVE_WEIGHT_SUM = 0.80
 BACKLOG_THRESHOLD = 0.75
 CANDIDATE_POOL_THRESHOLD = 0.50
-DEFAULT_UNSCORED_SCORE = 0.80
+# An unavailable scorer must not autonomously expand scope. Park unknown work
+# at the candidate-pool boundary so a later run or a human can rescore it.
+DEFAULT_UNSCORED_SCORE = 0.50
 
 COST_DIMENSIONS = {"C", "Risk"}
 
@@ -96,6 +99,7 @@ class OpportunityScorer:
         if not candidates:
             return []
         import json
+
         try:
             output = self.llm.invoke(
                 system_prompt=SCORER_SYSTEM,
@@ -105,19 +109,23 @@ class OpportunityScorer:
                     iteration=iteration,
                     candidates=json.dumps(
                         [
-                            {"id": candidate.id, "title": candidate.title,
-                             "description": candidate.description,
-                             "evidence": candidate.evidence}
+                            {
+                                "id": candidate.id,
+                                "title": candidate.title,
+                                "description": candidate.description,
+                                "evidence": candidate.evidence,
+                            }
                             for candidate in candidates
                         ],
-                        ensure_ascii=False, indent=2,
+                        ensure_ascii=False,
+                        indent=2,
                     ),
                 ),
                 stage_name="harness_scorer",
             )
         except Exception:
             # Transient LLM failure must not fail the run: score every
-            # candidate with the default (nothing usable -> 0.80).
+            # candidate at the safe candidate-pool boundary.
             if self.track is not None and tracker is not None:
                 self.track(tracker, "harness_scorer")
             for candidate in candidates:
@@ -131,8 +139,7 @@ class OpportunityScorer:
         for entry in data.get("scores") or []:
             if not isinstance(entry, dict) or not entry.get("id"):
                 continue
-            dims = {key: entry[key] for key in SCORE_WEIGHTS
-                    if key in entry}
+            dims = {key: entry[key] for key in SCORE_WEIGHTS if key in entry}
             if "rationale" in entry:
                 dims["rationale"] = entry["rationale"]
             by_id[str(entry["id"])] = dims
@@ -144,8 +151,8 @@ class OpportunityScorer:
                 continue
             if not any(key in SCORE_WEIGHTS for key in dims):
                 # Matched id but no usable dimension scores (only id and/or
-                # rationale): keep the "nothing usable -> 0.80" promise
-                # instead of computing 0.0 and rejecting the candidate.
+                # rationale): park unknown work at the safe boundary instead
+                # of computing 0.0 or autonomously promoting it.
                 candidate.score = DEFAULT_UNSCORED_SCORE
                 candidate.dimensions = {
                     "rationale": "scorer returned no dimensions",

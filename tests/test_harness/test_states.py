@@ -11,6 +11,8 @@ def test_flow_follows_legal_round_trip():
     flow.transition(HarnessStage.DESIGN)
     flow.transition(HarnessStage.PLAN)
     flow.transition(HarnessStage.BUILD)
+    flow.transition(HarnessStage.VERIFY)
+    flow.transition(HarnessStage.REVIEW)
     flow.transition(HarnessStage.REFLECT)
     flow.transition(HarnessStage.DISCOVER)
     flow.transition(HarnessStage.PRIORITIZE)
@@ -21,7 +23,8 @@ def test_flow_follows_legal_round_trip():
     assert flow.stage is HarnessStage.STOP
     assert [e.stage for e in flow.events] == [
         HarnessStage.UNDERSTAND, HarnessStage.RESEARCH, HarnessStage.DESIGN,
-        HarnessStage.PLAN, HarnessStage.BUILD, HarnessStage.REFLECT,
+        HarnessStage.PLAN, HarnessStage.BUILD, HarnessStage.VERIFY,
+        HarnessStage.REVIEW, HarnessStage.REFLECT,
         HarnessStage.DISCOVER, HarnessStage.PRIORITIZE, HarnessStage.RESEARCH,
         HarnessStage.DESIGN, HarnessStage.PLAN, HarnessStage.STOP,
     ]

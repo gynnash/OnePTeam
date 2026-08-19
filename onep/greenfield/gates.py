@@ -73,13 +73,30 @@ def discover_quality_commands(workspace: Path) -> list[str]:
     workspace = Path(workspace)
     commands: list[str] = []
     pyproject = workspace / "pyproject.toml"
-    if pyproject.exists() or (workspace / "pytest.ini").exists() or (workspace / "tests").is_dir():
+    pyproject_text = pyproject.read_text(errors="replace") if pyproject.exists() else ""
+    pytest_configured = (
+        (workspace / "pytest.ini").exists()
+        or "[tool.pytest." in pyproject_text
+        or any(
+            path.exists() and "[pytest]" in path.read_text(errors="replace")
+            for path in (workspace / "tox.ini", workspace / "setup.cfg")
+        )
+    )
+    test_files = [
+        *workspace.glob("test_*.py"),
+        *workspace.glob("*_test.py"),
+    ]
+    for root_name in ("test", "tests"):
+        root = workspace / root_name
+        if root.is_dir():
+            test_files.extend(root.rglob("test_*.py"))
+            test_files.extend(root.rglob("*_test.py"))
+    if pytest_configured or test_files:
         commands.append("pytest -q")
-        text = pyproject.read_text(errors="replace") if pyproject.exists() else ""
-        if "ruff" in text:
-            commands.append("ruff check .")
-        if "mypy" in text:
-            commands.append("mypy .")
+    if "ruff" in pyproject_text:
+        commands.append("ruff check .")
+    if "mypy" in pyproject_text:
+        commands.append("mypy .")
     package = workspace / "package.json"
     if package.exists():
         try:

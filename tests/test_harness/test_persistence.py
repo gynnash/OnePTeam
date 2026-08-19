@@ -1,5 +1,8 @@
 from onep.harness.models import HarnessRun
+import pytest
+
 from onep.harness.persistence import (
+    HarnessStateCorrupt,
     clear_stop_request,
     harness_run_path,
     load_harness_run,
@@ -10,8 +13,11 @@ from onep.harness.persistence import (
 
 def test_save_and_load_round_trip(tmp_path):
     run = HarnessRun(
-        id="h-1", project_name="demo", workspace=str(tmp_path),
-        mode="greenfield", original_goal="build value",
+        id="h-1",
+        project_name="demo",
+        workspace=str(tmp_path),
+        mode="greenfield",
+        original_goal="build value",
     )
     run.iteration = 3
     save_harness_run(run)
@@ -27,11 +33,12 @@ def test_load_returns_none_when_missing(tmp_path):
     assert load_harness_run(tmp_path) is None
 
 
-def test_load_returns_none_for_corrupt_yaml(tmp_path):
+def test_load_reports_corrupt_yaml(tmp_path):
     path = harness_run_path(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(":: not valid yaml")
-    assert load_harness_run(tmp_path) is None
+    with pytest.raises(HarnessStateCorrupt, match="invalid harness state"):
+        load_harness_run(tmp_path)
 
 
 def test_stop_requested_flag(tmp_path):

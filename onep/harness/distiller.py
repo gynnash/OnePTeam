@@ -1,4 +1,5 @@
 """KnowledgeDistiller: LLM filtering/structuring of raw harness events."""
+
 from __future__ import annotations
 
 import json
@@ -6,7 +7,8 @@ from typing import Any, Callable
 
 from onep.harness.discover import _json_object
 from onep.harness.knowledge_models import (
-    KnowledgeEvent, KnowledgeEventType,
+    KnowledgeEvent,
+    KnowledgeEventType,
 )
 
 DISTILLER_SYSTEM = (
@@ -77,11 +79,7 @@ class KnowledgeDistiller:
     ) -> list[KnowledgeEvent]:
         if not raw_events:
             return []
-        rendered = (
-            self.collapse_repair_loops(raw_events)
-            if collapse
-            else raw_events
-        )
+        rendered = self.collapse_repair_loops(raw_events) if collapse else raw_events
         output = self.llm.invoke(
             system_prompt=DISTILLER_SYSTEM,
             user_prompt=DISTILLER_PROMPT.format(
@@ -100,21 +98,29 @@ class KnowledgeDistiller:
             self.track(tracker, "harness_distiller")
         data = _json_object(output or "")
         events = []
+        valid_types = {event_type.value for event_type in KnowledgeEventType}
         for raw in data.get("events") or []:
+            if len(events) >= 6:
+                break
             if not isinstance(raw, dict):
                 continue
-            events.append(KnowledgeEvent(
-                type=str(raw.get("type") or KnowledgeEventType.INSIGHT.value),
-                iteration=int(raw.get("iteration") or iteration),
-                problem=str(raw.get("problem") or ""),
-                options=[str(entry) for entry in raw.get("options") or []],
-                selected=str(raw.get("selected") or ""),
-                reason=str(raw.get("reason") or ""),
-                evidence=str(raw.get("evidence") or ""),
-                files=[str(entry) for entry in raw.get("files") or []],
-                outcome=str(raw.get("outcome") or ""),
-                generalizable=bool(raw.get("generalizable", False)),
-            ))
+            event_type = str(raw.get("type") or "").lower()
+            if event_type not in valid_types:
+                continue
+            events.append(
+                KnowledgeEvent(
+                    type=event_type,
+                    iteration=int(raw.get("iteration") or iteration),
+                    problem=str(raw.get("problem") or ""),
+                    options=[str(entry) for entry in raw.get("options") or []],
+                    selected=str(raw.get("selected") or ""),
+                    reason=str(raw.get("reason") or ""),
+                    evidence=str(raw.get("evidence") or ""),
+                    files=[str(entry) for entry in raw.get("files") or []],
+                    outcome=str(raw.get("outcome") or ""),
+                    generalizable=bool(raw.get("generalizable", False)),
+                )
+            )
         return events
 
     @staticmethod
@@ -136,6 +142,7 @@ class KnowledgeDistiller:
         §6.1 (one Failure per loop).
         """
         merged: list[dict[str, Any]] = []
+        repair_group: dict[str, Any] | None = None
         for event in raw_events:
             if not isinstance(event, dict):
                 continue
@@ -147,20 +154,25 @@ class KnowledgeDistiller:
                 and str(payload.get("label") or "") == "SLICE"
             )
             if is_slice_trace:
-                merged.append({"type": "slice", "payload": {}})
+                if repair_group is not None:
+                    merged.append(repair_group)
+                    repair_group = None
                 continue
-            if etype != "repair_brief":
+            if etype == "repair_brief":
+                if repair_group is None:
+                    repair_group = {
+                        "type": "repair_brief",
+                        "payload": {"retry_count": 0, "attempts": []},
+                    }
+                repair_group["payload"]["retry_count"] += 1
+                repair_group["payload"]["attempts"].append(payload or {})
                 continue
-            if not merged or str(merged[-1].get("type")) != "repair_brief":
-                merged.append({"type": "repair_brief", "payload": {
-                    "retry_count": 0, "attempts": [],
-                }})
-            entry = merged[-1]
-            entry["payload"]["retry_count"] = (
-                int(entry["payload"].get("retry_count") or 0) + 1
-            )
-            entry["payload"]["attempts"].append(payload or {})
-        return [
-            entry for entry in merged
-            if str(entry.get("type")) == "repair_brief"
-        ]
+            if etype in {"trace", "engineer_trajectory"}:
+                continue
+            if repair_group is not None:
+                merged.append(repair_group)
+                repair_group = None
+            merged.append(event)
+        if repair_group is not None:
+            merged.append(repair_group)
+        return merged

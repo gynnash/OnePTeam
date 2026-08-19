@@ -35,6 +35,15 @@ from onep.greenfield.models import (
     SlicePlan,
 )
 from onep.greenfield.recorder import GreenfieldRecorder
+from onep.greenfield.verification import (
+    build_final_verification,
+    build_slice_verification,
+    can_reuse_verification,
+    dedupe_slice_gates,
+    is_broad_test_command,
+    is_pytest_command,
+    is_test_command,
+)
 from onep.llm.adapters import LLMAdapter
 from onep.llm.cost import CostTracker
 from onep.llm.router import resolve_model
@@ -96,12 +105,16 @@ class GreenfieldEngine:
         self.optimizer = OptimizeEngine()
         self.reviewer = ReviewAgent(self.llm)
         self._diagnosis_cache: dict[str, str] = {}
+        self._verified_assessment_fingerprint = ""
 
     def run(
         self,
         project: Project,
         options: GreenfieldOptions | None = None,
     ) -> bool:
+        # Verification reuse is intentionally process-local to this invocation.
+        # A resumed run must re-check its environment even when Git is unchanged.
+        self._verified_assessment_fingerprint = ""
         workspace = Path(project.workspace_path).resolve()
         state = load_state(workspace)
         run = self._load_run(workspace, state)
@@ -165,7 +178,7 @@ class GreenfieldEngine:
                 workspace, run, contract, self._load_architecture(run_dir)
             )
             self._commit_design_docs(session)
-            requirements_satisfied = self.build_pending_slices(
+            self.build_pending_slices(
                 run, contract, session, recorder, tracker
             )
             gate_runner = GreenfieldGateRunner(load_config().pipeline.test_timeout)
@@ -503,9 +516,11 @@ class GreenfieldEngine:
                         ]
                     )
                 )
-                current_mandatory = all_mandatory
-                if focused:
-                    current_mandatory = self._dedupe_slice_gates(focused, all_mandatory)
+                verification = build_slice_verification(
+                    plan, contract, focused, all_mandatory
+                )
+                focused = list(verification.focused_commands)
+                current_mandatory = list(verification.mandatory_commands)
                 recorder.trace(
                     "TEST",
                     f"实现已完成，执行 {len(focused) + len(current_mandatory)} 个快速质量闸门；"
@@ -584,7 +599,7 @@ class GreenfieldEngine:
                                 )
 
             review = None
-            if not failure_type:
+            if not failure_type and verification.review_required:
                 run.stage = GreenfieldStage.REVIEW
                 recorder.trace("REVIEW", "只读 Reviewer 正在检查逻辑、架构和回归风险")
                 review = self.reviewer.review(
@@ -615,6 +630,12 @@ class GreenfieldEngine:
                         "已忽略与实际通过测试直接矛盾的 Reviewer 推测",
                         "yellow",
                     )
+            elif not failure_type:
+                recorder.trace(
+                    "REVIEW",
+                    "聚焦验收证据充分且切片风险较低，跳过中间 Reviewer；最终评审仍会执行",
+                    "dim",
+                )
 
             recorder.save_attempt(
                 plan,
@@ -892,9 +913,23 @@ class GreenfieldEngine:
             raise RuntimeError(
                 "No mandatory quality gate discovered; pass --test-command"
             )
-        recorder.trace("FULL_VERIFY", "正在执行完整回归质量闸门")
-        result = gate_runner.run(session.workspace, [], mandatory)
-        if not result.passed:
+        fingerprint = self._assessment_fingerprint(session, mandatory, contract)
+        reuse_assessment = can_reuse_verification(
+            fingerprint,
+            self._verified_assessment_fingerprint,
+            accepted=run.last_assessment_satisfied,
+        )
+        result = None
+        if reuse_assessment:
+            recorder.trace(
+                "FULL_VERIFY",
+                "当前代码和命令已在本次运行通过完整验收，复用结果并跳过重复回归",
+                "green",
+            )
+        else:
+            recorder.trace("FULL_VERIFY", "正在执行完整回归质量闸门")
+            result = gate_runner.run(session.workspace, [], mandatory)
+        if result is not None and not result.passed:
             failed = next(cmd for cmd in result.commands if not cmd.passed)
             raw_failure = failed.stdout + "\n" + failed.stderr
             brief = RepairBrief.build(
@@ -949,27 +984,36 @@ class GreenfieldEngine:
             raise RuntimeError(
                 f"Full verification failed: {failed.command}: {raw_failure[-1500:]}"
             )
-        self._mark_final_acceptance(contract, result)
-        recorder.save_contract(contract)
+        if result is not None:
+            self._mark_final_acceptance(contract, result)
+            recorder.save_contract(contract)
         if not contract.required_complete:
             raise RuntimeError(
                 "P0/P1 acceptance items lack passing executable evidence"
             )
         run.stage = GreenfieldStage.ARCHITECTURE_REVIEW
-        full_diff = session.repo.git.diff(run.base_commit, "HEAD")
-        review = self.reviewer.review(
-            "Final architecture and acceptance review. Treat these as blocking: "
-            "a user-visible configuration field that is parsed but never consumed; "
-            "a claimed pipeline stage whose output is discarded; scheduling or "
-            "automation requirements without an executable mechanism; tests that "
-            "only prove files exist instead of required output semantics; or an "
-            "operational entry point that cannot run the product end to end.",
-            full_diff,
-            self._test_summary(result),
-            self._repository_summary(session.workspace),
-        )
-        self._track(tracker, "code_reviewer")
-        if not review.passed:
+        review = None
+        if reuse_assessment:
+            recorder.trace(
+                "ARCHITECTURE_REVIEW",
+                "复用本次完整需求语义评审；代码指纹未变化",
+                "green",
+            )
+        else:
+            full_diff = session.repo.git.diff(run.base_commit, "HEAD")
+            review = self.reviewer.review(
+                "Final architecture and acceptance review. Treat these as blocking: "
+                "a user-visible configuration field that is parsed but never consumed; "
+                "a claimed pipeline stage whose output is discarded; scheduling or "
+                "automation requirements without an executable mechanism; tests that "
+                "only prove files exist instead of required output semantics; or an "
+                "operational entry point that cannot run the product end to end.",
+                full_diff,
+                self._test_summary(result),
+                self._repository_summary(session.workspace),
+            )
+            self._track(tracker, "code_reviewer")
+        if review is not None and not review.passed:
             detail = "; ".join(review.findings) or review.summary
             recorder.failure(
                 "ARCHITECTURE_REVIEW",
@@ -1194,7 +1238,13 @@ class GreenfieldEngine:
                 if evidence not in item.evidence:
                     item.evidence.append(evidence)
         recorder.save_contract(contract)
-        self._save_assessment(run, recorder, fingerprint, [], True)
+        accepted_fingerprint = self._assessment_fingerprint(
+            session, commands, contract
+        )
+        self._verified_assessment_fingerprint = accepted_fingerprint
+        self._save_assessment(
+            run, recorder, accepted_fingerprint, [], True
+        )
         return True
 
     @staticmethod
@@ -2166,48 +2216,11 @@ class GreenfieldEngine:
 
     @staticmethod
     def _is_broad_test_command(command: str) -> bool:
-        try:
-            parts = shlex.split(command)
-        except ValueError:
-            return False
-        if parts[:3] in (["python", "-m", "pytest"], ["python3", "-m", "pytest"]):
-            args = parts[3:]
-        elif parts and parts[0] == "pytest":
-            args = parts[1:]
-        else:
-            return False
-        targets = [
-            value
-            for value in args
-            if not value.startswith("-")
-            and not re.fullmatch(r"\d*(?:>|<|>>|<<)&?\d*", value)
-        ]
-        return not targets or all(
-            value.rstrip("/") in {".", "test", "tests"} for value in targets
-        )
+        return is_broad_test_command(command)
 
     @staticmethod
     def _is_test_command(command: str) -> bool:
-        try:
-            parts = shlex.split(command)
-        except ValueError:
-            return False
-        return bool(
-            parts
-            and (
-                parts[0] == "pytest"
-                or parts[:3]
-                in (["python", "-m", "pytest"], ["python3", "-m", "pytest"])
-                or parts[:2] in (["npm", "test"], ["go", "test"], ["cargo", "test"])
-                or parts[:3] in (["npm", "run", "test"],)
-                or (parts[0] in {"pnpm", "yarn"} and "test" in parts[1:])
-                or (
-                    parts[0] == "./gradlew"
-                    and any("test" in value.lower() for value in parts[1:])
-                )
-                or parts[:2] == ["mvn", "test"]
-            )
-        )
+        return is_test_command(command)
 
     @classmethod
     def _dedupe_slice_gates(
@@ -2215,32 +2228,11 @@ class GreenfieldEngine:
         focused: list[str],
         mandatory: list[str],
     ) -> list[str]:
-        """Do not execute equivalent test suites twice in one slice attempt."""
-        if not focused:
-            return list(mandatory)
-        focused_runs_full_suite = any(
-            cls._is_broad_test_command(cmd) for cmd in focused
-        )
-        return [
-            command
-            for command in mandatory
-            if not (
-                cls._is_test_command(command)
-                if focused_runs_full_suite
-                else cls._is_broad_test_command(command)
-            )
-        ]
+        return dedupe_slice_gates(focused, mandatory)
 
     @staticmethod
     def _is_pytest_command(command: str) -> bool:
-        try:
-            parts = shlex.split(command)
-        except ValueError:
-            return False
-        return bool(parts) and (
-            parts[0] == "pytest"
-            or parts[:3] in (["python", "-m", "pytest"], ["python3", "-m", "pytest"])
-        )
+        return is_pytest_command(command)
 
     @staticmethod
     def _slice_gate_commands(workspace: Path, run: GreenfieldRun) -> list[str]:
@@ -2259,20 +2251,13 @@ class GreenfieldEngine:
         run: GreenfieldRun,
         contract: AcceptanceContract,
     ) -> list[str]:
-        return list(
-            dict.fromkeys(
-                [
-                    *discover_quality_commands(workspace),
-                    *(command for item in contract.items for command in item.commands),
-                    *(
-                        command
-                        for plan in run.slices
-                        for command in plan.focused_commands
-                    ),
-                    *run.options.test_commands,
-                ]
-            )
+        plan = build_final_verification(
+            discover_quality_commands(workspace),
+            [command for item in contract.items for command in item.commands],
+            [command for item in run.slices for command in item.focused_commands],
+            run.options.test_commands,
         )
+        return list(plan.commands)
 
     @staticmethod
     def _mark_acceptance(

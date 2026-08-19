@@ -15,10 +15,12 @@ from onep.greenfield.models import (
 from onep.greenfield.recorder import GreenfieldRecorder
 from onep.harness.engine import HarnessEngine
 from onep.harness.interventions import (
-    load_candidate_decisions, record_candidate_decision,
+    load_candidate_decisions,
+    record_candidate_decision,
 )
 from onep.harness.models import HarnessOptions, StopReason
 from onep.harness.persistence import load_harness_run, stop_requested
+from onep.harness.vault import VaultWriter
 from onep.llm.adapters import TokenUsage
 from onep.persistence.models import Project, ProjectMode, ProjectStatus
 from onep.persistence.state import load_state, save_state
@@ -50,11 +52,23 @@ class FakeLLM:
 
 class IteratingLLM(FakeLLM):
     def invoke(self, system_prompt, user_prompt, stage_name):
+        if stage_name == "harness_scorer":
+            return (
+                '{"scores": [{"id": "I-001", "V": 1, "Q": 1, '
+                '"R": 1, "E": 1, "C": 0, "Risk": 0, '
+                '"rationale": "directly improves the product"}]}'
+            )
         if stage_name == "harness_brainstorm":
             self.brainstorm_calls += 1
             if self.brainstorm_calls == 1:
-                return ('{"candidates": [{"id": "I-001", "title": "Add CLI", '
-                        '"description": "Expose VALUE via a CLI command"}]}')
+                return (
+                    '{"candidates": [{"id": "I-001", "title": "Add CLI", '
+                    '"description": "Expose VALUE via a CLI command", '
+                    '"evidence": "REQ-1 lacks a CLI", '
+                    '"acceptance_criteria": ["CLI exposes VALUE"], '
+                    '"expected_files": ["app.py", "test_app.py"], '
+                    '"focused_commands": ["pytest -q"]}]}'
+                )
             return '{"candidates": []}'
         return super().invoke(system_prompt, user_prompt, stage_name)
 
@@ -121,6 +135,64 @@ def test_harness_runs_full_loop_and_stops_goals_satisfied(tmp_path, monkeypatch)
     assert (tmp_path / "app.py").read_text() == "VALUE = 1\n"
 
 
+def test_final_verify_failure_rejects_provisional_success_stop(tmp_path, monkeypatch):
+    _repo(tmp_path)
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    engine = HarnessEngine(llm=FakeLLM())
+    engine.kernel.optimizer = WritingOptimizer()
+
+    def fail_final_verify(*args, **kwargs):
+        raise RuntimeError("final regression failed")
+
+    monkeypatch.setattr(engine.kernel, "_final_verify", fail_final_verify)
+    assert (
+        engine.run(
+            _project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4,
+                max_repairs_per_slice=2,
+                test_commands=["pytest -q"],
+                deploy_mode="none",
+            ),
+        )
+        is False
+    )
+    run = load_harness_run(tmp_path)
+    assert run.status == "failed"
+    assert run.stop_state["reason"] == "error"
+    assert run.stop_state["evidence"]["rejected_stop_reason"] == "goals_satisfied"
+
+
+def test_harness_mixed_mode_builds_requirement_gap(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (tmp_path / "existing.py").write_text("LEGACY = True\n")
+    repo.index.add(["existing.py"])
+    repo.index.commit("existing application")
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    engine = HarnessEngine(llm=FakeLLM())
+    engine.kernel.optimizer = WritingOptimizer()
+
+    assert (
+        engine.run(
+            _project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4,
+                max_repairs_per_slice=2,
+                test_commands=["pytest -q"],
+                deploy_mode="none",
+            ),
+        )
+        is True
+    )
+    run = load_harness_run(tmp_path)
+    assert run.mode == "mixed"
+    assert run.product_spec["acceptance_contract"]["requirements"][0]["id"] == "REQ-1"
+    assert (tmp_path / "existing.py").exists()
+    assert (tmp_path / "app.py").read_text() == "VALUE = 1\n"
+
+
 def test_harness_iterates_when_brainstorm_finds_work(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
@@ -144,11 +216,9 @@ def test_harness_iterates_when_brainstorm_finds_work(tmp_path, monkeypatch):
     assert run.iteration == 2
     assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
     assert len(run.quality_history) == 2
-    integrated = [c for c in run.improvement_candidates
-                  if c.status == "integrated"]
+    integrated = [c for c in run.improvement_candidates if c.status == "integrated"]
     assert [c.id for c in integrated] == ["I-001"]
-    assert any(w.id == "iter1-1" and w.status == "completed"
-               for w in run.work_items)
+    assert any(w.id == "iter1-1" and w.status == "completed" for w in run.work_items)
     assert repo.active_branch.name.startswith("onep/greenfield-")
 
 
@@ -186,7 +256,9 @@ def test_harness_persists_options_on_first_run(tmp_path, monkeypatch):
     engine.run(
         _project(tmp_path),
         GreenfieldOptions(
-            max_rounds=9, test_commands=["pytest -q"], deploy_mode="none",
+            max_rounds=9,
+            test_commands=["pytest -q"],
+            deploy_mode="none",
         ),
     )
     run = load_harness_run(tmp_path)
@@ -195,13 +267,41 @@ def test_harness_persists_options_on_first_run(tmp_path, monkeypatch):
     assert run.greenfield_run is not None
 
 
+def test_candidate_pool_is_preserved_across_round_merges():
+    from onep.harness.models import HarnessRun, ImprovementCandidate
+
+    run = HarnessRun(
+        id="h",
+        project_name="demo",
+        workspace="/tmp/demo",
+        mode="greenfield",
+        original_goal="build value",
+        improvement_candidates=[
+            ImprovementCandidate(
+                id="I-old", title="Old idea", status="parked", description="old"
+            )
+        ],
+    )
+    HarnessEngine._merge_improvement_candidates(
+        run,
+        [
+            ImprovementCandidate(
+                id="I-new", title="New idea", status="backlog", description="new"
+            )
+        ],
+        [],
+    )
+    assert [candidate.id for candidate in run.improvement_candidates] == [
+        "I-old",
+        "I-new",
+    ]
+
+
 def test_run_pipeline_routes_through_harness(tmp_path, monkeypatch):
     _repo(tmp_path)
     monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
-    monkeypatch.setattr(
-        "onep.orchestrator.runner.init_db", lambda: None
-    )
+    monkeypatch.setattr("onep.orchestrator.runner.init_db", lambda: None)
     monkeypatch.setattr(
         "onep.orchestrator.runner.list_projects",
         lambda: [_project(tmp_path)],
@@ -217,9 +317,7 @@ def test_run_pipeline_routes_through_harness(tmp_path, monkeypatch):
             calls.append((project.name, options))
             return True
 
-    monkeypatch.setattr(
-        "onep.orchestrator.runner.HarnessEngine", _RecordingHarness
-    )
+    monkeypatch.setattr("onep.orchestrator.runner.HarnessEngine", _RecordingHarness)
     from onep.orchestrator.runner import run_pipeline
     from onep.greenfield.models import GreenfieldOptions
 
@@ -242,8 +340,10 @@ def test_user_stop_flag_cleared_on_resume_transition(tmp_path, monkeypatch):
     engine = HarnessEngine(llm=FakeLLM())
     engine.kernel.optimizer = WritingOptimizer()
     options = GreenfieldOptions(
-        max_rounds=4, max_repairs_per_slice=2,
-        test_commands=["pytest -q"], deploy_mode="none",
+        max_rounds=4,
+        max_repairs_per_slice=2,
+        test_commands=["pytest -q"],
+        deploy_mode="none",
     )
 
     assert engine.run(_project(tmp_path), options) is True
@@ -272,8 +372,10 @@ def test_harness_adopts_legacy_greenfield_run(tmp_path, monkeypatch):
     engine = HarnessEngine(llm=FakeLLM())
     engine.kernel.optimizer = WritingOptimizer()
     options = GreenfieldOptions(
-        max_rounds=4, max_repairs_per_slice=2,
-        test_commands=["pytest -q"], deploy_mode="none",
+        max_rounds=4,
+        max_repairs_per_slice=2,
+        test_commands=["pytest -q"],
+        deploy_mode="none",
     )
 
     base_branch = repo.active_branch.name
@@ -282,8 +384,7 @@ def test_harness_adopts_legacy_greenfield_run(tmp_path, monkeypatch):
     repo.git.checkout("-b", legacy_branch)
     (tmp_path / "app.py").write_text("VALUE = 1\n")
     (tmp_path / "test_app.py").write_text(
-        "from app import VALUE\n\n"
-        "def test_value():\n    assert VALUE == 1\n"
+        "from app import VALUE\n\n" "def test_value():\n    assert VALUE == 1\n"
     )
     repo.index.add(["app.py", "test_app.py"])
     repo.index.commit("feat: legacy slice core")
@@ -299,22 +400,34 @@ def test_harness_adopts_legacy_greenfield_run(tmp_path, monkeypatch):
         base_commit=base_commit,
         run_branch=legacy_branch,
     )
-    legacy.slices = [SlicePlan(
-        id="core", title="Core", objective="set value",
-        acceptance_ids=["REQ-1"],
-        expected_files=["app.py", "test_app.py"],
-        focused_commands=[],
-    )]
+    legacy.slices = [
+        SlicePlan(
+            id="core",
+            title="Core",
+            objective="set value",
+            acceptance_ids=["REQ-1"],
+            expected_files=["app.py", "test_app.py"],
+            focused_commands=[],
+        )
+    ]
     run_dir = tmp_path / ".onep" / "greenfield" / "runs" / legacy.id
     recorder = GreenfieldRecorder(run_dir, legacy, Console())
     recorder.save_run()
     recorder.save_slice(legacy.slices[0])
-    recorder.save_contract(AcceptanceContract.from_dict({
-        "requirements": [{
-            "id": "REQ-1", "priority": "P0", "behavior": "value is one",
-            "verification": {"commands": ["pytest -q"], "evidence": []},
-        }],
-    }))
+    recorder.save_contract(
+        AcceptanceContract.from_dict(
+            {
+                "requirements": [
+                    {
+                        "id": "REQ-1",
+                        "priority": "P0",
+                        "behavior": "value is one",
+                        "verification": {"commands": ["pytest -q"], "evidence": []},
+                    }
+                ],
+            }
+        )
+    )
     state = load_state(tmp_path)
     state.artifacts["greenfield_run_id"] = legacy.id
     save_state(tmp_path, state)
@@ -356,21 +469,23 @@ def test_user_stop_skips_finalize_tail_and_pauses(tmp_path, monkeypatch):
     def _must_not_run(name):
         def _inner(*args, **kwargs):
             raise AssertionError(f"{name} must not run after a user stop")
+
         return _inner
 
+    monkeypatch.setattr(engine.kernel, "_final_verify", _must_not_run("_final_verify"))
     monkeypatch.setattr(
-        engine.kernel, "_final_verify", _must_not_run("_final_verify")
-    )
-    monkeypatch.setattr(
-        engine.kernel, "_commit_completion_docs",
+        engine.kernel,
+        "_commit_completion_docs",
         _must_not_run("_commit_completion_docs"),
     )
 
     success = engine.run(
         _project(tmp_path),
         GreenfieldOptions(
-            max_rounds=4, max_repairs_per_slice=2,
-            test_commands=["pytest -q"], deploy_mode="none",
+            max_rounds=4,
+            max_repairs_per_slice=2,
+            test_commands=["pytest -q"],
+            deploy_mode="none",
         ),
     )
 
@@ -391,8 +506,10 @@ def test_harness_resume_runs_sanitize_and_design_docs(tmp_path, monkeypatch):
     engine = HarnessEngine(llm=FakeLLM())
     engine.kernel.optimizer = WritingOptimizer()
     options = GreenfieldOptions(
-        max_rounds=4, max_repairs_per_slice=2,
-        test_commands=["pytest -q"], deploy_mode="none",
+        max_rounds=4,
+        max_repairs_per_slice=2,
+        test_commands=["pytest -q"],
+        deploy_mode="none",
     )
 
     assert engine.run(_project(tmp_path), options) is True
@@ -401,11 +518,13 @@ def test_harness_resume_runs_sanitize_and_design_docs(tmp_path, monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        engine.kernel, "_sanitize_generated_commands",
+        engine.kernel,
+        "_sanitize_generated_commands",
         lambda *a, **k: calls.append("sanitize"),
     )
     monkeypatch.setattr(
-        engine.kernel, "_write_design_docs",
+        engine.kernel,
+        "_write_design_docs",
         lambda *a, **k: calls.append("design"),
     )
 
@@ -420,20 +539,24 @@ class ResearchLLM(FakeLLM):
 
     def invoke(self, system_prompt, user_prompt, stage_name):
         if stage_name == "harness_researcher":
-            return ('{"questions": ["cli patterns"]}'
-                    if "questions" in user_prompt or "Produce focused" in user_prompt
-                    else '{"cards": [{"repo": "cli/repo", "pattern": "builder", '
-                         '"module_boundaries": ["parse"], "data_flow": "in->out", '
-                         '"evidence_files": ["src/parse.py"], '
-                         '"strengths": ["clean"], "weaknesses": ["slow"]}], '
-                         '"evidence": [{"claim": "builders win", '
-                         '"source_repos": ["cli/repo"], "detail": "fits"}], '
-                         '"tradeoffs": []}')
+            return (
+                '{"questions": ["cli patterns"]}'
+                if "questions" in user_prompt or "Produce focused" in user_prompt
+                else '{"cards": [{"repo": "cli/repo", "pattern": "builder", '
+                '"module_boundaries": ["parse"], "data_flow": "in->out", '
+                '"evidence_files": ["src/parse.py"], '
+                '"strengths": ["clean"], "weaknesses": ["slow"]}], '
+                '"evidence": [{"claim": "builders win", '
+                '"source_repos": ["cli/repo"], "detail": "fits"}], '
+                '"tradeoffs": []}'
+            )
         if stage_name == "harness_architect":
-            return ('{"architecture": {"selected": "builder-with-citations", '
-                    '"rationale": "evidence"}, "evidence_citations": ['
-                    '{"claim": "builders win", "source_repo": "cli/repo", '
-                    '"detail": "adopt"}]}')
+            return (
+                '{"architecture": {"selected": "builder-with-citations", '
+                '"rationale": "evidence"}, "evidence_citations": ['
+                '{"claim": "builders win", "source_repo": "cli/repo", '
+                '"detail": "adopt"}]}'
+            )
         return super().invoke(system_prompt, user_prompt, stage_name)
 
 
@@ -444,8 +567,14 @@ class StubClient:
     def search_repos(self, query, max_results=10):
         self.searches.append(query)
         from onep.harness.github_client import RepoInfo
-        return [RepoInfo(full_name="cli/repo", stargazers_count=900,
-                         pushed_at="2026-06-01T00:00:00Z")]
+
+        return [
+            RepoInfo(
+                full_name="cli/repo",
+                stargazers_count=900,
+                pushed_at="2026-06-01T00:00:00Z",
+            )
+        ]
 
     def filter_repos(self, repos, max_repos=3, min_stars=100, max_age_days=730):
         return repos[:max_repos]
@@ -454,7 +583,10 @@ class StubClient:
         return "# cli repo\n"
 
     def fetch_top_tree(self, full_name, max_entries=30):
-        return ["src", "README.md"]
+        return ["src", "src/parse.py", "README.md"]
+
+    def fetch_file(self, full_name, path, max_chars=6000):
+        return "def parse(value):\n    return value\n"
 
 
 def test_harness_research_evidence_reaches_architecture_doc(tmp_path, monkeypatch):
@@ -470,8 +602,10 @@ def test_harness_research_evidence_reaches_architecture_doc(tmp_path, monkeypatc
     success = engine.run(
         _project(tmp_path),
         GreenfieldOptions(
-            max_rounds=4, max_repairs_per_slice=2,
-            test_commands=["pytest -q"], deploy_mode="none",
+            max_rounds=4,
+            max_repairs_per_slice=2,
+            test_commands=["pytest -q"],
+            deploy_mode="none",
         ),
     )
     assert success is True
@@ -499,9 +633,18 @@ class BrownfieldFakeLLM(FakeLLM):
 class BrownfieldCoordinator:
     executed = []
 
-    def __init__(self, engine, test_runner, reviewer, git_session,
-                 llm=None, recorder=None, cost_tracker=None,
-                 project_context="", **kwargs):
+    def __init__(
+        self,
+        engine,
+        test_runner,
+        reviewer,
+        git_session,
+        llm=None,
+        recorder=None,
+        cost_tracker=None,
+        project_context="",
+        **kwargs,
+    ):
         pass
 
     def develop_plan(self, candidate, plan_text, session):
@@ -527,7 +670,8 @@ class BrownfieldSession:
     def create_plan_session(self, plan_id, title):
         self.branches.append(plan_id)
         return SimpleNamespace(
-            branch_name=f"plan-{plan_id}", worktree=self.source_path,
+            branch_name=f"plan-{plan_id}",
+            worktree=self.source_path,
             base_commit="c0ffee",
         )
 
@@ -545,16 +689,20 @@ def test_harness_brownfield_loop_scans_builds_and_stops(tmp_path, monkeypatch):
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
     monkeypatch.setattr(
         "onep.harness.engine.analyze_source",
-        lambda source, llm, tracker=None, project_name="", source_files=None,
-        **kwargs: [StrategyItem(
-            id="si-1", title="Cache", file_location="app.py:1",
-            summary="cache issue", tags=["cache"], impact="medium",
-        )],
+        lambda source, llm, tracker=None, project_name="", source_files=None, **kwargs: [
+            StrategyItem(
+                id="si-1",
+                title="Cache",
+                file_location="app.py:1",
+                summary="cache issue",
+                tags=["cache"],
+                impact="medium",
+            )
+        ],
     )
     monkeypatch.setattr(
         "onep.harness.engine.generate_optimize_plan",
-        lambda item, workspace, llm_adapter, plan_index=1, memory_context="":
-        SimpleNamespace(
+        lambda item, workspace, llm_adapter, plan_index=1, memory_context="": SimpleNamespace(
             plan_path=str(Path(workspace) / "plan.md"),
             plan_markdown="# plan",
             expected_files=("app.py",),
@@ -563,8 +711,7 @@ def test_harness_brownfield_loop_scans_builds_and_stops(tmp_path, monkeypatch):
             risk_flags=(),
         ),
     )
-    monkeypatch.setattr(
-        "onep.harness.brownfield.GitRunSession", BrownfieldSession)
+    monkeypatch.setattr("onep.harness.brownfield.GitRunSession", BrownfieldSession)
     BrownfieldCoordinator.executed.clear()
     monkeypatch.setattr(
         "onep.harness.brownfield.OptimizeCoordinator",
@@ -577,7 +724,9 @@ def test_harness_brownfield_loop_scans_builds_and_stops(tmp_path, monkeypatch):
     success = engine.run(
         _brownfield_project(tmp_path),
         GreenfieldOptions(
-            max_rounds=4, test_commands=["pytest -q"], deploy_mode="none",
+            max_rounds=4,
+            test_commands=["python -c \"print('ok')\""],
+            deploy_mode="none",
         ),
     )
 
@@ -610,7 +759,9 @@ def test_harness_brownfield_empty_scan_stops_immediately(tmp_path, monkeypatch):
     success = engine.run(
         _brownfield_project(tmp_path),
         GreenfieldOptions(
-            max_rounds=4, test_commands=["pytest -q"], deploy_mode="none",
+            max_rounds=4,
+            test_commands=["python -c \"print('ok')\""],
+            deploy_mode="none",
         ),
     )
 
@@ -619,6 +770,33 @@ def test_harness_brownfield_empty_scan_stops_immediately(tmp_path, monkeypatch):
     assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
     assert run.work_items == []
     assert run.iteration == 0
+
+
+def test_harness_brownfield_empty_scan_still_requires_passing_gates(
+    tmp_path, monkeypatch
+):
+    repo = _repo(tmp_path)
+    (tmp_path / "app.py").write_text("x = 1\n")
+    repo.index.add(["app.py"])
+    repo.index.commit("source")
+    monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
+    monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
+    monkeypatch.setattr(
+        "onep.harness.engine.analyze_source", lambda *args, **kwargs: []
+    )
+    engine = HarnessEngine(llm=BrownfieldFakeLLM())
+    assert (
+        engine.run(
+            _brownfield_project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4, test_commands=["pytest -q"], deploy_mode="none"
+            ),
+        )
+        is False
+    )
+    run = load_harness_run(tmp_path)
+    assert run.status == "failed"
+    assert run.stop_state["reason"] == "error"
 
 
 def test_harness_brownfield_clears_stale_stop_flag(tmp_path, monkeypatch):
@@ -633,37 +811,55 @@ def test_harness_brownfield_clears_stale_stop_flag(tmp_path, monkeypatch):
     monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
     monkeypatch.setattr(
-        "onep.harness.engine.analyze_source", lambda *args, **kwargs: [])
+        "onep.harness.engine.analyze_source", lambda *args, **kwargs: []
+    )
 
     engine = HarnessEngine(llm=BrownfieldFakeLLM())
-    assert engine.run(
-        _brownfield_project(tmp_path),
-        GreenfieldOptions(max_rounds=4, test_commands=["pytest -q"],
-                          deploy_mode="none"),
-    ) is True
+    assert (
+        engine.run(
+            _brownfield_project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4,
+                test_commands=["python -c \"print('ok')\""],
+                deploy_mode="none",
+            ),
+        )
+        is True
+    )
     assert stop_requested(tmp_path) is False
     run = load_harness_run(tmp_path)
     assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
 
 
-def test_harness_brownfield_empty_workspace_falls_back_to_greenfield(tmp_path, monkeypatch):
+def test_harness_brownfield_empty_workspace_falls_back_to_greenfield(
+    tmp_path, monkeypatch
+):
     _repo(tmp_path)  # README-only repo: no code files
     monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
     monkeypatch.setattr(
-        "onep.harness.engine.analyze_source", lambda *args, **kwargs: [])
+        "onep.harness.engine.analyze_source", lambda *args, **kwargs: []
+    )
     engine = HarnessEngine(llm=BrownfieldFakeLLM())
     engine.kernel.optimizer = WritingOptimizer()
-    assert engine.run(
-        _brownfield_project(tmp_path),
-        GreenfieldOptions(max_rounds=4, test_commands=["pytest -q"],
-                          deploy_mode="none"),
-    ) is True
+    assert (
+        engine.run(
+            _brownfield_project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4,
+                test_commands=["python -c \"print('ok')\""],
+                deploy_mode="none",
+            ),
+        )
+        is True
+    )
     run = load_harness_run(tmp_path)
     assert run.mode == "greenfield"
 
 
-def test_harness_brownfield_parks_candidate_when_plan_generation_fails(tmp_path, monkeypatch):
+def test_harness_brownfield_parks_candidate_when_plan_generation_fails(
+    tmp_path, monkeypatch
+):
     """A planner failure mid-backlog must park the candidate without
     leaving it marked integrated (no orphan work item, run still completes)."""
     from onep.strategy.models import StrategyItem
@@ -678,58 +874,74 @@ def test_harness_brownfield_parks_candidate_when_plan_generation_fails(tmp_path,
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
     monkeypatch.setattr(
         "onep.harness.engine.analyze_source",
-        lambda source, llm, tracker=None, project_name="", source_files=None,
-        **kwargs: [StrategyItem(
-            id="si-1", title="Cache", file_location="app.py:1",
-            summary="cache issue", tags=["cache"], impact="medium",
-        )],
+        lambda source, llm, tracker=None, project_name="", source_files=None, **kwargs: [
+            StrategyItem(
+                id="si-1",
+                title="Cache",
+                file_location="app.py:1",
+                summary="cache issue",
+                tags=["cache"],
+                impact="medium",
+            )
+        ],
     )
     calls = {"n": 0}
 
-    def flaky_planner(item, workspace, llm_adapter, plan_index=1,
-                      memory_context=""):
+    def flaky_planner(item, workspace, llm_adapter, plan_index=1, memory_context=""):
         calls["n"] += 1
         if calls["n"] == 1:
             return SimpleNamespace(
                 plan_path=str(Path(workspace) / "plan.md"),
-                plan_markdown="# plan", expected_files=("app.py",),
-                dependencies=(), test_commands=("pytest -q",),
+                plan_markdown="# plan",
+                expected_files=("app.py",),
+                dependencies=(),
+                test_commands=("pytest -q",),
                 risk_flags=(),
             )
         raise RuntimeError("planner boom")
 
-    monkeypatch.setattr(
-        "onep.harness.engine.generate_optimize_plan", flaky_planner)
-    monkeypatch.setattr(
-        "onep.harness.brownfield.GitRunSession", BrownfieldSession)
+    monkeypatch.setattr("onep.harness.engine.generate_optimize_plan", flaky_planner)
+    monkeypatch.setattr("onep.harness.brownfield.GitRunSession", BrownfieldSession)
     BrownfieldCoordinator.executed.clear()
     monkeypatch.setattr(
-        "onep.harness.brownfield.OptimizeCoordinator", BrownfieldCoordinator)
+        "onep.harness.brownfield.OptimizeCoordinator", BrownfieldCoordinator
+    )
 
     class BrainstormOnceBrownfieldLLM(BrownfieldFakeLLM):
         def invoke(self, system_prompt, user_prompt, stage_name):
+            if stage_name == "harness_scorer":
+                return (
+                    '{"scores": [{"id": "B-001", "V": 1, "Q": 1, '
+                    '"R": 1, "E": 1, "C": 0, "Risk": 0, '
+                    '"rationale": "valuable"}]}'
+                )
             if stage_name == "harness_brainstorm":
                 if not getattr(self, "gave_candidate", False):
                     self.gave_candidate = True
-                    return ('{"candidates": [{"id": "B-001", '
-                            '"title": "Add CLI", "description": '
-                            '"Expose VALUE via a CLI command"}]}')
+                    return (
+                        '{"candidates": [{"id": "B-001", '
+                        '"title": "Add CLI", "description": '
+                        '"Expose VALUE via a CLI command", '
+                        '"evidence": "code: missing CLI entry point"}]}'
+                    )
                 return '{"candidates": []}'
             return super().invoke(system_prompt, user_prompt, stage_name)
 
     engine = HarnessEngine(llm=BrainstormOnceBrownfieldLLM())
     success = engine.run(
         _brownfield_project(tmp_path),
-        GreenfieldOptions(max_rounds=4, test_commands=["pytest -q"],
-                          deploy_mode="none"),
+        GreenfieldOptions(
+            max_rounds=4,
+            test_commands=["python -c \"print('ok')\""],
+            deploy_mode="none",
+        ),
     )
 
     assert success is True
     run = load_harness_run(tmp_path)
     assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
     assert run.iteration == 2
-    parked = [c for c in run.improvement_candidates
-              if c.status == "parked"]
+    parked = [c for c in run.improvement_candidates if c.status == "parked"]
     assert [c.id for c in parked] == ["B-001"]
     assert not any(w.id == "iter1-1" for w in run.work_items)
 
@@ -749,13 +961,24 @@ def test_harness_in_loop_design_docs_are_committed(tmp_path, monkeypatch):
             self.flagged = False
 
         def invoke(self, system_prompt, user_prompt, stage_name):
+            if stage_name == "harness_scorer":
+                return (
+                    '{"scores": [{"id": "I-001", "V": 1, "Q": 1, '
+                    '"R": 1, "E": 1, "C": 0, "Risk": 0, '
+                    '"rationale": "valuable"}]}'
+                )
             if stage_name == "harness_brainstorm":
                 self.brainstorm_calls += 1
                 if self.brainstorm_calls == 1:
-                    return ('{"candidates": [{"id": "I-001", '
-                            '"title": "Add CLI", '
-                            '"description": "Expose VALUE via a CLI command", '
-                            '"evidence": "REQ-1 ok"}]}')
+                    return (
+                        '{"candidates": [{"id": "I-001", '
+                        '"title": "Add CLI", '
+                        '"description": "Expose VALUE via a CLI command", '
+                        '"evidence": "REQ-1 ok", '
+                        '"acceptance_criteria": ["CLI exposes VALUE"], '
+                        '"expected_files": ["app.py", "test_app.py"], '
+                        '"focused_commands": ["pytest -q"]}]}'
+                    )
                 return '{"candidates": []}'
             output = super().invoke(system_prompt, user_prompt, stage_name)
             # Request a user stop right after the first evidence-bearing
@@ -782,8 +1005,10 @@ def test_harness_in_loop_design_docs_are_committed(tmp_path, monkeypatch):
     success = engine.run(
         _project(tmp_path),
         GreenfieldOptions(
-            max_rounds=4, max_repairs_per_slice=2,
-            test_commands=["pytest -q"], deploy_mode="none",
+            max_rounds=4,
+            max_repairs_per_slice=2,
+            test_commands=["pytest -q"],
+            deploy_mode="none",
         ),
     )
     assert success is True
@@ -804,13 +1029,15 @@ class KnowledgeLLM(FakeLLM):
     def invoke(self, system_prompt, user_prompt, stage_name):
         if stage_name == "harness_distiller":
             self.distill_calls += 1
-            return ('{"events": [{"type": "decision", '
-                    '"problem": "how to structure the module", '
-                    '"options": ["flat", "nested"], "selected": "flat", '
-                    '"reason": "simpler imports", '
-                    '"evidence": "gate passed after attempt", '
-                    '"files": ["app.py"], "outcome": "accepted", '
-                    '"generalizable": true}]}')
+            return (
+                '{"events": [{"type": "decision", '
+                '"problem": "how to structure the module", '
+                '"options": ["flat", "nested"], "selected": "flat", '
+                '"reason": "simpler imports", '
+                '"evidence": "gate passed after attempt", '
+                '"files": ["app.py"], "outcome": "accepted", '
+                '"generalizable": true}]}'
+            )
         return super().invoke(system_prompt, user_prompt, stage_name)
 
 
@@ -822,13 +1049,18 @@ def test_harness_distills_events_into_project_vault(tmp_path, monkeypatch):
     engine = HarnessEngine(llm=llm, vault_root=tmp_path / "global-vault")
     engine.kernel.optimizer = WritingOptimizer()
 
-    assert engine.run(
-        _project(tmp_path),
-        GreenfieldOptions(
-            max_rounds=4, max_repairs_per_slice=2,
-            test_commands=["pytest -q"], deploy_mode="none",
-        ),
-    ) is True
+    assert (
+        engine.run(
+            _project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4,
+                max_repairs_per_slice=2,
+                test_commands=["pytest -q"],
+                deploy_mode="none",
+            ),
+        )
+        is True
+    )
 
     run = load_harness_run(tmp_path)
     assert run.knowledge_events
@@ -838,8 +1070,10 @@ def test_harness_distills_events_into_project_vault(tmp_path, monkeypatch):
     moc = knowledge_dir / "Project.md"
     assert moc.exists()
     moc_text = moc.read_text()
+    assert "- Status: completed" in moc_text
     assert "## Decisions" in moc_text
-    assert "[[how-to-structure-the-module]]" in moc_text
+    expected_slug = VaultWriter.event_note_slug(run.knowledge_events[0])
+    assert f"[[{expected_slug}]]" in moc_text
     decision_notes = list((knowledge_dir / "Decisions").glob("*.md"))
     assert decision_notes
     assert "type: decision" in decision_notes[0].read_text()
@@ -858,16 +1092,20 @@ def test_harness_brownfield_records_per_candidate_events(tmp_path, monkeypatch):
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
     monkeypatch.setattr(
         "onep.harness.engine.analyze_source",
-        lambda source, llm, tracker=None, project_name="", source_files=None,
-        **kwargs: [StrategyItem(
-            id="si-1", title="Cache", file_location="app.py:1",
-            summary="cache issue", tags=["cache"], impact="medium",
-        )],
+        lambda source, llm, tracker=None, project_name="", source_files=None, **kwargs: [
+            StrategyItem(
+                id="si-1",
+                title="Cache",
+                file_location="app.py:1",
+                summary="cache issue",
+                tags=["cache"],
+                impact="medium",
+            )
+        ],
     )
     monkeypatch.setattr(
         "onep.harness.engine.generate_optimize_plan",
-        lambda item, workspace, llm_adapter, plan_index=1, memory_context="":
-        SimpleNamespace(
+        lambda item, workspace, llm_adapter, plan_index=1, memory_context="": SimpleNamespace(
             plan_path=str(Path(workspace) / "plans" / "plan-1.md"),
             plan_markdown="# plan 1",
             expected_files=("app.py",),
@@ -876,8 +1114,7 @@ def test_harness_brownfield_records_per_candidate_events(tmp_path, monkeypatch):
             risk_flags=(),
         ),
     )
-    monkeypatch.setattr(
-        "onep.harness.brownfield.GitRunSession", BrownfieldSession)
+    monkeypatch.setattr("onep.harness.brownfield.GitRunSession", BrownfieldSession)
     received = []
 
     class RecordingCoordinator(BrownfieldCoordinator):
@@ -886,16 +1123,21 @@ def test_harness_brownfield_records_per_candidate_events(tmp_path, monkeypatch):
             received.append(kwargs.get("recorder"))
 
     monkeypatch.setattr(
-        "onep.harness.brownfield.OptimizeCoordinator", RecordingCoordinator)
+        "onep.harness.brownfield.OptimizeCoordinator", RecordingCoordinator
+    )
 
-    engine = HarnessEngine(
-        llm=BrownfieldFakeLLM(), vault_root=tmp_path / "vault")
-    assert engine.run(
-        _brownfield_project(tmp_path),
-        GreenfieldOptions(
-            max_rounds=4, test_commands=["pytest -q"], deploy_mode="none",
-        ),
-    ) is True
+    engine = HarnessEngine(llm=BrownfieldFakeLLM(), vault_root=tmp_path / "vault")
+    assert (
+        engine.run(
+            _brownfield_project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4,
+                test_commands=["pytest -q"],
+                deploy_mode="none",
+            ),
+        )
+        is True
+    )
 
     assert received and received[0] is not None
     run = load_harness_run(tmp_path)
@@ -924,13 +1166,18 @@ def test_harness_distill_failure_does_not_break_run(tmp_path, monkeypatch):
     engine = HarnessEngine(llm=FailingDistillerLLM())
     engine.kernel.optimizer = WritingOptimizer()
 
-    assert engine.run(
-        _project(tmp_path),
-        GreenfieldOptions(
-            max_rounds=4, max_repairs_per_slice=2,
-            test_commands=["pytest -q"], deploy_mode="none",
-        ),
-    ) is True
+    assert (
+        engine.run(
+            _project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4,
+                max_repairs_per_slice=2,
+                test_commands=["pytest -q"],
+                deploy_mode="none",
+            ),
+        )
+        is True
+    )
 
     run = load_harness_run(tmp_path)
     assert run.status == "completed"
@@ -950,14 +1197,21 @@ def test_harness_brownfield_zero_items_records_completed_event(tmp_path, monkeyp
     monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
     monkeypatch.setattr(
-        "onep.harness.engine.analyze_source", lambda *args, **kwargs: [])
+        "onep.harness.engine.analyze_source", lambda *args, **kwargs: []
+    )
     engine = HarnessEngine(llm=BrownfieldFakeLLM())
 
-    assert engine.run(
-        _brownfield_project(tmp_path),
-        GreenfieldOptions(max_rounds=4, test_commands=["pytest -q"],
-                          deploy_mode="none"),
-    ) is True
+    assert (
+        engine.run(
+            _brownfield_project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4,
+                test_commands=["python -c \"print('ok')\""],
+                deploy_mode="none",
+            ),
+        )
+        is True
+    )
     run = load_harness_run(tmp_path)
     assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
     assert run.iteration == 0
@@ -969,9 +1223,11 @@ def test_harness_brownfield_zero_items_records_completed_event(tmp_path, monkeyp
 class KnowledgeLLMWithCross(KnowledgeLLM):
     def invoke(self, system_prompt, user_prompt, stage_name):
         if stage_name == "harness_cross_distiller":
-            return ('{"principles": [{"title": "Delay Abstraction", '
-                    '"summary": "Wait for the second consumer.", '
-                    '"tags": ["design"]}], "patterns": []}')
+            return (
+                '{"principles": [{"title": "Delay Abstraction", '
+                '"summary": "Wait for the second consumer.", '
+                '"tags": ["design"]}], "patterns": []}'
+            )
         return super().invoke(system_prompt, user_prompt, stage_name)
 
 
@@ -980,17 +1236,28 @@ def test_harness_cross_distills_generalizable_insights(tmp_path, monkeypatch):
     monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
     engine = HarnessEngine(
-        llm=KnowledgeLLMWithCross(), vault_root=tmp_path / "global-vault")
+        llm=KnowledgeLLMWithCross(), vault_root=tmp_path / "global-vault"
+    )
     engine.kernel.optimizer = WritingOptimizer()
-    assert engine.run(
-        _project(tmp_path),
-        GreenfieldOptions(
-            max_rounds=4, max_repairs_per_slice=2,
-            test_commands=["pytest -q"], deploy_mode="none",
-        ),
-    ) is True
-    principle = (tmp_path / "global-vault" / "Engineering"
-                 / "Principles" / "delay-abstraction.md")
+    assert (
+        engine.run(
+            _project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4,
+                max_repairs_per_slice=2,
+                test_commands=["pytest -q"],
+                deploy_mode="none",
+            ),
+        )
+        is True
+    )
+    principle = (
+        tmp_path
+        / "global-vault"
+        / "Engineering"
+        / "Principles"
+        / "delay-abstraction.md"
+    )
     assert principle.exists()
     text = principle.read_text()
     assert "type: principle" in text
@@ -1012,18 +1279,23 @@ def test_harness_cross_distill_failure_does_not_fail_run(tmp_path, monkeypatch):
     monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
     monkeypatch.setattr(
-        "onep.harness.engine.CrossProjectDistiller", FailingCrossDistiller)
-    engine = HarnessEngine(
-        llm=KnowledgeLLM(), vault_root=tmp_path / "global-vault")
+        "onep.harness.engine.CrossProjectDistiller", FailingCrossDistiller
+    )
+    engine = HarnessEngine(llm=KnowledgeLLM(), vault_root=tmp_path / "global-vault")
     engine.kernel.optimizer = WritingOptimizer()
 
-    assert engine.run(
-        _project(tmp_path),
-        GreenfieldOptions(
-            max_rounds=4, max_repairs_per_slice=2,
-            test_commands=["pytest -q"], deploy_mode="none",
-        ),
-    ) is True
+    assert (
+        engine.run(
+            _project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4,
+                max_repairs_per_slice=2,
+                test_commands=["pytest -q"],
+                deploy_mode="none",
+            ),
+        )
+        is True
+    )
     run = load_harness_run(tmp_path)
     assert run.status == "completed"
 
@@ -1035,11 +1307,18 @@ def test_harness_writes_flow_events(tmp_path, monkeypatch):
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
     engine = HarnessEngine(llm=FakeLLM())
     engine.kernel.optimizer = WritingOptimizer()
-    assert engine.run(
-        _project(tmp_path),
-        GreenfieldOptions(max_rounds=4, max_repairs_per_slice=2,
-                          test_commands=["pytest -q"], deploy_mode="none"),
-    ) is True
+    assert (
+        engine.run(
+            _project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4,
+                max_repairs_per_slice=2,
+                test_commands=["pytest -q"],
+                deploy_mode="none",
+            ),
+        )
+        is True
+    )
     events_path = tmp_path / ".onep" / "harness" / "flow-events.jsonl"
     assert events_path.exists()
     stages = []
@@ -1066,7 +1345,10 @@ class ApprovedCandidateLLM(FakeLLM):
                 return (
                     '{"candidates": [{"id": "I-001", "title": "Add a CLI", '
                     '"description": "Expose product value through a CLI", '
-                    '"evidence": "product gap"}]}'
+                    '"evidence": "REQ-1 product gap", '
+                    '"acceptance_criteria": ["CLI exposes product value"], '
+                    '"expected_files": ["app.py", "test_app.py"], '
+                    '"focused_commands": ["pytest -q"]}]}'
                 )
             return '{"candidates": []}'
         if stage_name == "harness_scorer":
@@ -1086,11 +1368,18 @@ def test_harness_applies_human_approval_to_backlog(tmp_path, monkeypatch):
     record_candidate_decision(tmp_path, "I-001", "approve", note="user wants it")
     engine = HarnessEngine(llm=ApprovedCandidateLLM())
     engine.kernel.optimizer = WritingOptimizer()
-    assert engine.run(
-        _project(tmp_path),
-        GreenfieldOptions(max_rounds=4, max_repairs_per_slice=2,
-                          test_commands=["pytest -q"], deploy_mode="none"),
-    ) is True
+    assert (
+        engine.run(
+            _project(tmp_path),
+            GreenfieldOptions(
+                max_rounds=4,
+                max_repairs_per_slice=2,
+                test_commands=["pytest -q"],
+                deploy_mode="none",
+            ),
+        )
+        is True
+    )
     run = load_harness_run(tmp_path)
     assert run.iteration == 2
     assert run.stop_state["reason"] == "goals_satisfied"

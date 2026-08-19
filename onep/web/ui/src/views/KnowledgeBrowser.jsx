@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { getArticle, getArticles, getGraph, getNote, getNotes, triggerArticle } from '../api.js';
 
 function GraphView({ graph }) {
+  const [selected, setSelected] = useState(null);
   if (!graph || !graph.nodes || graph.nodes.length === 0) return <p className="muted">No graph nodes yet.</p>;
   const width = 700, height = 420;
   const cols = Math.max(1, Math.ceil(Math.sqrt(graph.nodes.length)));
@@ -10,7 +11,8 @@ function GraphView({ graph }) {
     return { id: node.id, x: 40 + col * ((width - 80) / Math.max(1, cols - 1)), y: 40 + row * 60 };
   });
   const byId = new Map(positions.map((p) => [p.id, p]));
-  return (
+  const connected = selected ? graph.edges.filter((edge) => edge.source === selected.id || edge.target === selected.id) : [];
+  return (<>
     <svg viewBox={`0 0 ${width} ${height}`} className="graph" role="img" aria-label="reasoning graph">
       {graph.edges.map((edge, index) => {
         const a = byId.get(edge.source), b = byId.get(edge.target);
@@ -20,14 +22,35 @@ function GraphView({ graph }) {
       {graph.nodes.map((node) => {
         const p = byId.get(node.id);
         return (
-          <g key={node.id}>
+          <g key={node.id} onClick={() => setSelected(node)} style={{ cursor: 'pointer' }}>
             <circle cx={p.x} cy={p.y} r="8" fill="#4c9be8"><title>{node.label}</title></circle>
             <text x={p.x + 10} y={p.y + 4} className="graph-label">{node.label.slice(0, 18)}</text>
           </g>
         );
       })}
     </svg>
-  );
+    {selected && <div className="evidence"><strong>{selected.label}</strong><br />{selected.kind || selected.type || 'note'}
+      {connected.map((edge, index) => <div key={index}>{edge.source === selected.id ? '→' : '←'} {edge.label || 'related'} {edge.source === selected.id ? edge.target : edge.source}</div>)}
+    </div>}
+  </>);
+}
+
+function Markdown({ text, onWikiLink }) {
+  let inCode = false;
+  const renderInline = (line) => line.split(/(\[\[[^\]]+\]\])/g).map((part, index) => {
+    const match = part.match(/^\[\[([^\]|]+)(?:\|([^\]]+))?\]\]$/);
+    if (!match) return part;
+    return <button className="wiki-link" key={index} onClick={() => onWikiLink?.(match[1])}>{match[2] || match[1]}</button>;
+  });
+  return <div className="markdown">{String(text || '').split('\n').map((line, index) => {
+    if (line.startsWith('```')) { inCode = !inCode; return null; }
+    if (inCode) return <pre key={index}>{line}</pre>;
+    if (line.startsWith('### ')) return <h4 key={index}>{renderInline(line.slice(4))}</h4>;
+    if (line.startsWith('## ')) return <h3 key={index}>{renderInline(line.slice(3))}</h3>;
+    if (line.startsWith('# ')) return <h2 key={index}>{renderInline(line.slice(2))}</h2>;
+    if (line.startsWith('- ')) return <li key={index}>{renderInline(line.slice(2))}</li>;
+    return <p key={index}>{line ? renderInline(line) : ' '}</p>;
+  })}</div>;
 }
 
 export default function KnowledgeBrowser({ name, navigate }) {
@@ -54,6 +77,10 @@ export default function KnowledgeBrowser({ name, navigate }) {
   const openArticle = async (slug) => {
     setError('');
     try { setArticle(await getArticle(slug)); } catch (e) { setError(e.message); }
+  };
+  const openWikiLink = (slug) => {
+    const target = notes.find((entry) => entry.slug === slug);
+    if (target) openNote(target.path);
   };
   const generate = async () => {
     setBusy(true); setError(''); setMessage('');
@@ -91,7 +118,7 @@ export default function KnowledgeBrowser({ name, navigate }) {
             {note ? (
               <>
                 <pre className="evidence">{JSON.stringify(note.frontmatter, null, 2)}</pre>
-                <div className="markdown">{note.body.split('\n').map((line, index) => <p key={index}>{line || ' '}</p>)}</div>
+                <Markdown text={note.body} onWikiLink={openWikiLink} />
               </>
             ) : <p className="muted">Select a note to read it.</p>}
           </div>
@@ -113,7 +140,7 @@ export default function KnowledgeBrowser({ name, navigate }) {
           <div className="note-reader">
             {article ? (
               <>
-                <div className="markdown">{article.markdown.split('\n').map((line, index) => <p key={index}>{line || ' '}</p>)}</div>
+                <Markdown text={article.markdown} onWikiLink={openWikiLink} />
                 <h4>Reasoning graph for this article</h4>
                 <GraphView graph={article.graph} />
               </>

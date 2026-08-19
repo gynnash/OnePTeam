@@ -1,4 +1,5 @@
 """DESIGN stage: architecture generation with research evidence citations."""
+
 from __future__ import annotations
 
 from typing import Any, Callable
@@ -30,7 +31,9 @@ Return JSON only:
     "source_repo": "owner/name from the research above",
     "detail": "how the evidence applies to us"}}
 ]}}
-Every citation's source_repo MUST come from the research evidence above."""
+Every citation's source_repo MUST come from the research evidence above. For
+lightweight in-repository evidence whose source_repos is empty, use
+source_repo="local"."""
 
 
 def _researched_repo_names(report: ResearchReport) -> set[str]:
@@ -40,6 +43,8 @@ def _researched_repo_names(report: ResearchReport) -> set[str]:
         for repo in evidence.source_repos or []:
             if repo:
                 names.add(str(repo).lower())
+    if report.evidence and not names:
+        names.add("local")
     return names
 
 
@@ -66,18 +71,25 @@ class DesignStage:
         if not report.has_evidence:
             return draft_architecture, []
         import json
-        output = self.llm.invoke(
-            system_prompt=DESIGN_SYSTEM,
-            user_prompt=DESIGN_PROMPT.format(
-                acceptance=contract_summary or "(none)",
-                evidence=json.dumps(
-                    [card.to_dict() for card in report.evidence],
-                    ensure_ascii=False, indent=2,
+
+        try:
+            output = self.llm.invoke(
+                system_prompt=DESIGN_SYSTEM,
+                user_prompt=DESIGN_PROMPT.format(
+                    acceptance=contract_summary or "(none)",
+                    evidence=json.dumps(
+                        [card.to_dict() for card in report.evidence],
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    draft=json.dumps(draft_architecture, ensure_ascii=False),
                 ),
-                draft=json.dumps(draft_architecture, ensure_ascii=False),
-            ),
-            stage_name="harness_architect",
-        )
+                stage_name="harness_architect",
+            )
+        except Exception:
+            if self.track is not None and tracker is not None:
+                self.track(tracker, "harness_architect")
+            return draft_architecture, ["architect unavailable; retained draft"]
         if self.track is not None and tracker is not None:
             self.track(tracker, "harness_architect")
         data = _json_object(output or "")
@@ -86,16 +98,23 @@ class DesignStage:
             return draft_architecture, []
         citations = data.get("evidence_citations") or []
         valid, warnings = self.validate_citations(
-            citations, _researched_repo_names(report)
+            citations,
+            _researched_repo_names(report),
+            {card.claim.strip().casefold() for card in report.evidence if card.claim},
         )
-        if valid:
-            architecture["evidence_citations"] = valid
+        if not valid:
+            warnings.append(
+                "architecture had no valid evidence citation; retained draft"
+            )
+            return draft_architecture, warnings
+        architecture["evidence_citations"] = valid
         return architecture, warnings
 
     @staticmethod
     def validate_citations(
         citations: Any,
         repo_names: set[str],
+        evidence_claims: set[str] | None = None,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         if not isinstance(citations, list):
             return [], ["evidence_citations is not a list"]
@@ -107,8 +126,12 @@ class DesignStage:
                 continue
             repo = str(citation.get("source_repo") or "")
             if repo.lower() not in repo_names:
+                warnings.append(f"citation for unresearched repo dropped: {repo}")
+                continue
+            claim = str(citation.get("claim") or "").strip()
+            if evidence_claims is not None and claim.casefold() not in evidence_claims:
                 warnings.append(
-                    f"citation for unresearched repo dropped: {repo}"
+                    f"citation without matching evidence claim dropped: {claim}"
                 )
                 continue
             valid.append(citation)

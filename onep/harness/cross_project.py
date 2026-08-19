@@ -1,4 +1,5 @@
 """CrossProjectDistiller: lift generalizable insights into the global vault."""
+
 from __future__ import annotations
 
 import json
@@ -56,9 +57,7 @@ class CrossProjectDistiller:
         goal: str,
         tracker=None,
     ) -> list[dict[str, Any]]:
-        generalizable = [
-            event for event in events if bool(event.get("generalizable"))
-        ]
+        generalizable = [event for event in events if bool(event.get("generalizable"))]
         if not generalizable:
             return []
         try:
@@ -67,9 +66,7 @@ class CrossProjectDistiller:
                 user_prompt=CROSS_PROMPT.format(
                     project=project,
                     goal=goal or "(none)",
-                    events=json.dumps(
-                        generalizable, ensure_ascii=False, indent=2
-                    ),
+                    events=json.dumps(generalizable, ensure_ascii=False, indent=2),
                 ),
                 stage_name="harness_cross_distiller",
             )
@@ -82,8 +79,7 @@ class CrossProjectDistiller:
             return []
         written = []
         related = [
-            f"[[{VaultWriter.event_note_slug(event)}]]"
-            for event in generalizable
+            f"[[{VaultWriter.event_note_slug(event)}]]" for event in generalizable
         ]
         for section, raw_list in (
             ("Engineering/Principles", data.get("principles") or []),
@@ -110,12 +106,26 @@ class CrossProjectDistiller:
                     f"Lifted from `{project}` (goal: {goal or '(none)'}).\n\n"
                     + "\n".join(f"- {link}" for link in related)
                 )
-                path = self.writer.write_note(
-                    section, title, frontmatter, body
+                slug = title
+                path = self.writer.note_path(section, slug)
+                if path.exists():
+                    existing = path.read_text(encoding="utf-8")
+                    source = (
+                        f"\n\n## Additional Source\n\n"
+                        f"Lifted from `{project}` (goal: {goal or '(none)'}).\n\n"
+                        + "\n".join(f"- {link}" for link in related)
+                    )
+                    if f"Lifted from `{project}`" not in existing:
+                        path.write_text(
+                            existing.rstrip() + source + "\n", encoding="utf-8"
+                        )
+                else:
+                    path = self.writer.write_note(section, slug, frontmatter, body)
+                written.append(
+                    {
+                        "section": section,
+                        "title": title,
+                        "path": str(path),
+                    }
                 )
-                written.append({
-                    "section": section,
-                    "title": title,
-                    "path": str(path),
-                })
         return written

@@ -1,9 +1,11 @@
 """REST endpoints for projects, runs, candidates, and article triggering."""
+
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
+import git
 from fastapi import APIRouter, HTTPException
 
 from onep.cli.create import create_project, default_project_name
@@ -37,9 +39,14 @@ def projects_list():
 @router.post("/projects", status_code=201)
 def projects_create(payload: dict):
     requirement = str((payload or {}).get("requirement") or "").strip()
-    if not requirement:
-        raise HTTPException(status_code=400, detail="requirement is required")
-    name = str((payload or {}).get("name") or "").strip() or default_project_name(requirement)
+    source = str((payload or {}).get("workspace_path") or "").strip()
+    if not requirement and not source:
+        raise HTTPException(
+            status_code=400,
+            detail="requirement or workspace_path is required",
+        )
+    name = str((payload or {}).get("name") or "").strip()
+    name = name or default_project_name(requirement or Path(source).name)
     # Match what default_project_name can emit: word chars (\w covers unicode
     # letters incl. CJK, digits, underscore) plus dots/hyphens inside. Leading
     # word-char requirement rejects ".." and any "/", space, or dot-leading
@@ -49,17 +56,38 @@ def projects_create(payload: dict):
     init_db()
     if any(project.name == name for project in list_projects()):
         raise HTTPException(status_code=409, detail=f"project already exists: {name}")
-    try:
-        workspace = runtime.workspace_for(name)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    project = create_project(requirement, name=name, workspace=workspace,
-                             options=GreenfieldOptions())
+    if source:
+        workspace = Path(source).expanduser().resolve()
+        if not workspace.exists():
+            raise HTTPException(status_code=400, detail="workspace_path does not exist")
+        try:
+            git.Repo(workspace)
+        except (git.InvalidGitRepositoryError, git.NoSuchPathError) as exc:
+            raise HTTPException(
+                status_code=400, detail="workspace_path must be a Git repository"
+            ) from exc
+    else:
+        try:
+            workspace = runtime.workspace_for(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    project = create_project(
+        requirement, name=name, workspace=workspace, options=GreenfieldOptions()
+    )
+    spawned = runtime.spawn_run(name, workspace)
+    if spawned is None:
+        raise HTTPException(
+            status_code=503,
+            detail=f"project {name} was created but its run could not be started",
+        )
     return {
-        "id": project.id, "name": project.name, "mode": project.mode.value,
-        "status": project.status.value, "workspace_path": project.workspace_path,
+        "id": project.id,
+        "name": project.name,
+        "mode": project.mode.value,
+        "status": project.status.value,
+        "workspace_path": project.workspace_path,
         "requirement": project.requirement,
-        "spawn": runtime.spawn_run(name, workspace),
+        "spawn": spawned,
     }
 
 
@@ -76,7 +104,8 @@ def projects_detail(name: str):
 def projects_log(name: str, offset: int = 0, limit: int = 200):
     project = _project_by_name(name)
     entries = harness_state.log_entries(
-        Path(project.workspace_path), offset=offset, limit=min(limit, 500))
+        Path(project.workspace_path), offset=offset, limit=min(limit, 500)
+    )
     next_offset = entries[-1]["offset"] + 1 if entries else offset
     return {"entries": entries, "next_offset": next_offset}
 
@@ -85,6 +114,7 @@ def projects_log(name: str, offset: int = 0, limit: int = 200):
 def projects_stop(name: str):
     project = _project_by_name(name)
     from onep.harness.interventions import request_stop
+
     request_stop(Path(project.workspace_path))
     return {"ok": True, "note": "stop requested at the next iteration boundary"}
 
@@ -120,9 +150,13 @@ def _candidate_decision(name, candidate_id, decision, payload):
     workspace = Path(project.workspace_path)
     run = load_harness_run(workspace)
     if run is None or not any(c.id == candidate_id for c in run.improvement_candidates):
-        raise HTTPException(status_code=404, detail=f"candidate not found: {candidate_id}")
+        raise HTTPException(
+            status_code=404, detail=f"candidate not found: {candidate_id}"
+        )
     entry = record_candidate_decision(
-        workspace, candidate_id, decision,
+        workspace,
+        candidate_id,
+        decision,
         score=(payload or {}).get("score") if decision == "rescore" else None,
         note=str((payload or {}).get("note") or ""),
     )
@@ -140,6 +174,8 @@ def project_article(name: str):
     writer = VaultWriter(global_vault_root())
     synthesizer = ArticleSynthesizer(LLMAdapter(), writer)
     result = synthesizer.synthesize(workspace, run_dir, run)
-    return {"title": result["title"],
-            "article_path": str(result["article_path"]),
-            "graph_path": str(result["graph_path"])}
+    return {
+        "title": result["title"],
+        "article_path": str(result["article_path"]),
+        "graph_path": str(result["graph_path"]),
+    }

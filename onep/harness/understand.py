@@ -1,4 +1,5 @@
 """UNDERSTAND stage — produce the acceptance baseline for the run."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -27,6 +28,7 @@ def detect_mode(workspace: Path, requirement: str) -> str:
     no requirement is brownfield (pure optimization).
     """
     from onep.strategy.scanner import walk_files
+
     # The harness's own state dir (.onep/harness/run.yaml etc.) is written
     # before detection runs and must never count as source code.
     has_code = any(
@@ -55,9 +57,8 @@ class UnderstandStage:
         recorder: GreenfieldRecorder,
         tracker: CostTracker,
     ) -> AcceptanceContract:
-        if self.mode != "greenfield":
+        if self.mode not in {"greenfield", "mixed"}:
             raise HarnessUnsupportedMode(
-                "Brownfield harness unification lands in P2; "
-                "use `onep optimize` meanwhile."
+                "Pure brownfield optimization must use BrownfieldUnderstandStage."
             )
         return self.kernel._discover(run, workspace, recorder, tracker)

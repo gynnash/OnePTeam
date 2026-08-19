@@ -30,30 +30,60 @@ def _article_fixture(tmp_path):
     repo.index.add(["app.py"])
     repo.index.commit("feat: core value")
     run = HarnessRun(
-        id="h-1", project_name="demo", workspace=str(workspace),
-        mode="greenfield", original_goal="build value",
-        quality_history=[QualitySnapshot(
-            iteration=1, acceptance_pass_rate=1.0, test_pass_rate=1.0,
-            goal_coverage=1.0, quality_score=1.0, hard_gates_passed=True,
-        )],
+        id="h-1",
+        project_name="demo",
+        workspace=str(workspace),
+        mode="greenfield",
+        original_goal="build value",
+        quality_history=[
+            QualitySnapshot(
+                iteration=1,
+                acceptance_pass_rate=1.0,
+                test_pass_rate=1.0,
+                goal_coverage=1.0,
+                quality_score=1.0,
+                hard_gates_passed=True,
+            )
+        ],
         stop_state={"reason": "goals_satisfied", "evidence": {}},
-        knowledge_events=[{
-            "type": "decision", "iteration": 1, "problem": "how to wire",
-            "selected": "flat", "reason": "simpler", "generalizable": False,
-        }],
+        knowledge_events=[
+            {
+                "type": "decision",
+                "iteration": 1,
+                "problem": "how to wire",
+                "selected": "flat",
+                "reason": "simpler",
+                "generalizable": False,
+            }
+        ],
     )
     run_dir = tmp_path / "runs" / "h-1"
     run_dir.mkdir(parents=True)
-    save_distillations(run_dir, [
-        KnowledgeEvent(type="decision", iteration=1, problem="how to wire",
-                       selected="flat", reason="simpler"),
-        KnowledgeEvent(type="failure", iteration=1, problem="gate failed",
-                       outcome="repaired"),
-    ])
+    save_distillations(
+        run_dir,
+        [
+            KnowledgeEvent(
+                type="decision",
+                iteration=1,
+                problem="how to wire",
+                selected="flat",
+                reason="simpler",
+            ),
+            KnowledgeEvent(
+                type="failure", iteration=1, problem="gate failed", outcome="repaired"
+            ),
+        ],
+    )
     with open(run_dir / "events.jsonl", "a") as handle:
-        handle.write(json.dumps({
-            "type": "repair_brief", "payload": {"failure_type": "test_failed"},
-        }) + "\n")
+        handle.write(
+            json.dumps(
+                {
+                    "type": "repair_brief",
+                    "payload": {"failure_type": "test_failed"},
+                }
+            )
+            + "\n"
+        )
     with open(run_dir / "architecture-decisions.jsonl", "a") as handle:
         handle.write(json.dumps({"architecture": {"selected": "flat"}}) + "\n")
     return workspace, run_dir, run
@@ -61,21 +91,23 @@ def _article_fixture(tmp_path):
 
 def test_synthesize_writes_article_and_graph(tmp_path):
     workspace, run_dir, run = _article_fixture(tmp_path)
-    llm = ArticleLLM([
-        '{"events": [{"id": "e1", "type": "decision", '
-        '"problem": "how to wire", "selected": "flat", '
-        '"reason": "simpler", "iteration": 1}]}',
-        '{"clusters": [{"problem": "wiring", "event_ids": ["e1"], '
-        '"resolution": "flat"}]}',
-        '{"nodes": [{"id": "n1", "label": "wiring", "kind": "decision"}], '
-        '"edges": []}',
-        '{"insights": [{"title": "keep it flat", "summary": "flat wins", '
-        '"evidence": "e1"}]}',
-        '{"title": "Demo Journey", "markdown": "# Demo Journey\\n\\n'
-        '## What We Initially Believed\\n\\nWe believed nested.\\n\\n'
-        '## Decisions That Shaped the Outcome\\n\\n'
-        'We adopted [[how-to-wire]].\\n"}',
-    ])
+    llm = ArticleLLM(
+        [
+            '{"events": [{"id": "e1", "type": "decision", '
+            '"problem": "how to wire", "selected": "flat", '
+            '"reason": "simpler", "iteration": 1}]}',
+            '{"clusters": [{"problem": "wiring", "event_ids": ["e1"], '
+            '"resolution": "flat"}]}',
+            '{"nodes": [{"id": "n1", "label": "wiring", "kind": "decision"}], '
+            '"edges": []}',
+            '{"insights": [{"title": "keep it flat", "summary": "flat wins", '
+            '"evidence": "e1"}]}',
+            '{"title": "Demo Journey", "markdown": "# Demo Journey\\n\\n'
+            "## What We Initially Believed\\n\\nWe believed nested.\\n\\n"
+            "## Decisions That Shaped the Outcome\\n\\n"
+            'We adopted [[how-to-wire]].\\n"}',
+        ]
+    )
     writer = VaultWriter(tmp_path / "global", tmp_path / "project")
     synthesizer = ArticleSynthesizer(llm, writer)
     result = synthesizer.synthesize(workspace, run_dir, run)
@@ -84,42 +116,60 @@ def test_synthesize_writes_article_and_graph(tmp_path):
     assert result["article_path"].exists()
     text = result["article_path"].read_text()
     assert "type: article" in text
-    assert "[[how-to-wire]]" in text
+    assert "We adopted how-to-wire." in text
     assert result["graph_path"].exists()
     assert result["graph"]["nodes"][0]["id"] == "n1"
     assert llm.calls == [
-        "harness_article_extract", "harness_article_cluster",
-        "harness_article_graph", "harness_article_insight",
+        "harness_article_extract",
+        "harness_article_cluster",
+        "harness_article_graph",
+        "harness_article_insight",
         "harness_article_narrative",
     ]
+
+
+def test_article_graph_drops_dangling_edges():
+    graph = ArticleSynthesizer._validate_graph(
+        {
+            "nodes": [{"id": "n1", "label": "kept"}, {"id": "n1"}, {"id": ""}],
+            "edges": [
+                {"source": "n1", "target": "missing"},
+                {"source": "n1", "target": "n1", "label": "valid"},
+            ],
+        }
+    )
+    assert [node["id"] for node in graph["nodes"]] == ["n1"]
+    assert graph["edges"] == [{"source": "n1", "target": "n1", "label": "valid"}]
 
 
 def test_synthesize_no_events_skips_insight_llm(tmp_path):
     workspace, run_dir, run = _article_fixture(tmp_path)
     (run_dir / "distillations.jsonl").unlink()
-    llm = ArticleLLM([
-        '{"events": []}',
-        '{"title": "Demo Journey", "markdown": "# Demo Journey\\n\\n'
-        '## What We Initially Believed\\n\\nNothing recorded.\\n"}',
-    ])
+    llm = ArticleLLM(
+        [
+            '{"events": []}',
+            '{"title": "Demo Journey", "markdown": "# Demo Journey\\n\\n'
+            '## What We Initially Believed\\n\\nNothing recorded.\\n"}',
+        ]
+    )
     writer = VaultWriter(tmp_path / "global", tmp_path / "project")
-    result = ArticleSynthesizer(llm, writer).synthesize(
-        workspace, run_dir, run)
+    result = ArticleSynthesizer(llm, writer).synthesize(workspace, run_dir, run)
     assert result["article_path"].exists()
     assert "harness_article_insight" not in llm.calls
     assert llm.calls == [
-        "harness_article_extract", "harness_article_narrative",
+        "harness_article_extract",
+        "harness_article_narrative",
     ]
 
 
-def test_synthesize_falls_back_to_timeline_on_garbage(tmp_path):
+def test_synthesize_falls_back_to_reasoning_narrative_on_garbage(tmp_path):
     workspace, run_dir, run = _article_fixture(tmp_path)
     llm = ArticleLLM(["not json"] * 5)
     writer = VaultWriter(tmp_path / "global", tmp_path / "project")
-    result = ArticleSynthesizer(llm, writer).synthesize(
-        workspace, run_dir, run)
+    result = ArticleSynthesizer(llm, writer).synthesize(workspace, run_dir, run)
     assert result["article_path"].exists()
-    assert "Timeline" in result["markdown"]
+    assert "## What We Initially Believed" in result["markdown"]
+    assert "## Decisions That Shaped the Outcome" in result["markdown"]
     assert "feat: core value" in result["markdown"]
     assert "goals_satisfied" in result["markdown"]
 
@@ -133,10 +183,12 @@ class RaisingNarrativeLLM(ArticleLLM):
 
 def test_synthesize_frontmatter_carries_title(tmp_path):
     workspace, run_dir, run = _article_fixture(tmp_path)
-    llm = ArticleLLM([
-        '{"events": []}',
-        '{"title": "Demo Journey", "markdown": "# Demo Journey\\n"}',
-    ])
+    llm = ArticleLLM(
+        [
+            '{"events": []}',
+            '{"title": "Demo Journey", "markdown": "# Demo Journey\\n"}',
+        ]
+    )
     writer = VaultWriter(tmp_path / "global", tmp_path / "project")
     result = ArticleSynthesizer(llm, writer).synthesize(workspace, run_dir, run)
     text = result["article_path"].read_text()
@@ -145,21 +197,22 @@ def test_synthesize_frontmatter_carries_title(tmp_path):
 
 def test_synthesize_falls_back_when_narrative_llm_raises(tmp_path):
     workspace, run_dir, run = _article_fixture(tmp_path)
-    llm = RaisingNarrativeLLM([
-        '{"events": [{"id": "e1", "type": "decision", '
-        '"problem": "how to wire", "selected": "flat", '
-        '"reason": "simpler", "iteration": 1}]}',
-        '{"clusters": [{"problem": "wiring", "event_ids": ["e1"], '
-        '"resolution": "flat"}]}',
-        '{"nodes": [], "edges": []}',
-        '{"insights": []}',
-        "unused",
-    ])
+    llm = RaisingNarrativeLLM(
+        [
+            '{"events": [{"id": "e1", "type": "decision", '
+            '"problem": "how to wire", "selected": "flat", '
+            '"reason": "simpler", "iteration": 1}]}',
+            '{"clusters": [{"problem": "wiring", "event_ids": ["e1"], '
+            '"resolution": "flat"}]}',
+            '{"nodes": [], "edges": []}',
+            '{"insights": []}',
+            "unused",
+        ]
+    )
     writer = VaultWriter(tmp_path / "global", tmp_path / "project")
-    result = ArticleSynthesizer(llm, writer).synthesize(
-        workspace, run_dir, run)
+    result = ArticleSynthesizer(llm, writer).synthesize(workspace, run_dir, run)
     assert result["article_path"].exists()
     text = result["article_path"].read_text()
     assert "goals_satisfied" in text
     assert "build value" in text
-    assert "## Timeline (evidence)" in result["markdown"]
+    assert "## Where Beliefs Failed" in result["markdown"]

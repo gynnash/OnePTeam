@@ -25,7 +25,8 @@ def test_distill_parses_structured_events():
     llm = DistillLLM(EVENTS_PAYLOAD)
     events = KnowledgeDistiller(llm).distill(
         [{"type": "trace", "payload": {"message": "noise"}}],
-        "round_end", 2,
+        "round_end",
+        2,
     )
     assert [event.type for event in events] == ["failure", "insight"]
     assert events[0].iteration == 2
@@ -42,8 +43,7 @@ def test_distill_empty_raw_events_skips_llm():
 
 def test_distill_garbage_degrades_to_empty():
     llm = DistillLLM("not json")
-    assert KnowledgeDistiller(llm).distill(
-        [{"type": "trace"}], "round_end", 1) == []
+    assert KnowledgeDistiller(llm).distill([{"type": "trace"}], "round_end", 1) == []
 
 
 def test_distill_ignores_non_object_entries():
@@ -51,6 +51,22 @@ def test_distill_ignores_non_object_entries():
     events = KnowledgeDistiller(llm).distill([{"type": "trace"}], "round_end", 1)
     assert len(events) == 1
     assert events[0].type == "insight"
+
+
+def test_distill_rejects_unknown_types_and_caps_output():
+    payload = (
+        '{"events": ['
+        + ",".join(
+            ['{"type": "operation_log", "problem": "noise"}']
+            + ['{"type": "insight", "problem": "p"}'] * 7
+        )
+        + "]}"
+    )
+    events = KnowledgeDistiller(DistillLLM(payload)).distill(
+        [{"type": "trace"}], "round_end", 1
+    )
+    assert len(events) == 6
+    assert {event.type for event in events} == {"insight"}
 
 
 def test_distill_track_callback():
@@ -61,23 +77,30 @@ def test_distill_track_callback():
         tracked.append((tracker, stage))
 
     KnowledgeDistiller(llm, track=track).distill(
-        [{"type": "trace"}], "round_end", 1, tracker="tracker")
+        [{"type": "trace"}], "round_end", 1, tracker="tracker"
+    )
     assert tracked == [("tracker", "harness_distiller")]
 
 
 def test_collapse_repair_loops_groups_per_slice():
     raw = [
-        {"type": "trace", "payload": {"label": "SLICE 1/2",
-                                      "message": "SLICE 1/2: core"}},
+        {
+            "type": "trace",
+            "payload": {"label": "SLICE 1/2", "message": "SLICE 1/2: core"},
+        },
         {"type": "engineer_trajectory", "payload": {}},
         {"type": "repair_brief", "payload": {"failure_type": "test_failed"}},
         {"type": "engineer_trajectory", "payload": {}},
         {"type": "trace", "payload": {"label": "REPAIR", "message": "x"}},
         {"type": "repair_brief", "payload": {"failure_type": "test_failed"}},
-        {"type": "trace", "payload": {"label": "SLICE",
-                                      "message": "core 已通过并提交 abc12345"}},
-        {"type": "trace", "payload": {"label": "SLICE 2/2",
-                                      "message": "SLICE 2/2: api"}},
+        {
+            "type": "trace",
+            "payload": {"label": "SLICE", "message": "core 已通过并提交 abc12345"},
+        },
+        {
+            "type": "trace",
+            "payload": {"label": "SLICE 2/2", "message": "SLICE 2/2: api"},
+        },
         {"type": "repair_brief", "payload": {"failure_type": "review_failed"}},
     ]
     collapsed = KnowledgeDistiller.collapse_repair_loops(raw)
@@ -90,17 +113,24 @@ def test_collapse_repair_loops_groups_per_slice():
 
 def test_collapse_repair_loops_empty_and_noise():
     assert KnowledgeDistiller.collapse_repair_loops([]) == []
-    assert KnowledgeDistiller.collapse_repair_loops(
-        [{"type": "trace", "payload": {"label": "STATE", "message": "x"}}]
-    ) == []
+    assert (
+        KnowledgeDistiller.collapse_repair_loops(
+            [{"type": "trace", "payload": {"label": "STATE", "message": "x"}}]
+        )
+        == []
+    )
 
 
 def test_distill_collapse_false_passes_structured_payload_verbatim():
     llm = DistillLLM(EVENTS_PAYLOAD)
-    payload = [{"checkpoint": "review_complete", "slice_id": "core",
-                "review": "passed"}]
+    payload = [
+        {"checkpoint": "review_complete", "slice_id": "core", "review": "passed"}
+    ]
     events = KnowledgeDistiller(llm).distill(
-        payload, "review_complete", 1, collapse=False,
+        payload,
+        "review_complete",
+        1,
+        collapse=False,
     )
     assert [event.type for event in events] == ["failure", "insight"]
     user_prompt = llm.calls[0][1]
@@ -112,9 +142,10 @@ def test_distill_collapse_false_passes_structured_payload_verbatim():
 def test_distill_collapse_true_renders_collapsed_groups():
     llm = DistillLLM(EVENTS_PAYLOAD)
     KnowledgeDistiller(llm).distill(
-        [{"checkpoint": "review_complete", "slice_id": "core",
-          "review": "passed"}],
-        "review_complete", 1,
+        [{"checkpoint": "review_complete", "slice_id": "core", "review": "passed"}],
+        "review_complete",
+        1,
     )
     user_prompt = llm.calls[0][1]
-    assert "Raw events (JSON):\n[]" in user_prompt
+    assert '"checkpoint": "review_complete"' in user_prompt
+    assert '"review": "passed"' in user_prompt

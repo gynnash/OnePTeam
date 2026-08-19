@@ -1,4 +1,5 @@
 """Serializable models for the unified harness."""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -9,6 +10,7 @@ from typing import Any
 
 from onep.greenfield.models import GreenfieldOptions, GreenfieldRun, SlicePlan
 from onep.strategy.optimize_models import PlanCandidate
+from onep.strategy.plan_scheduler import PlanScheduler
 
 
 def _now() -> str:
@@ -35,6 +37,10 @@ class ImprovementCandidate:
     score: float | None = None
     dimensions: dict[str, Any] = field(default_factory=dict)
     evidence: str = ""
+    acceptance_criteria: list[str] = field(default_factory=list)
+    expected_files: list[str] = field(default_factory=list)
+    focused_commands: list[str] = field(default_factory=list)
+    work_item_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,10 +56,17 @@ class ImprovementCandidate:
             source=str(data.get("source") or "brainstorm"),
             fingerprint=str(data.get("fingerprint") or ""),
             status=str(data.get("status") or "pending"),
-            score=(float(data["score"]) if data.get("score") is not None
-                   else None),
+            score=(float(data["score"]) if data.get("score") is not None else None),
             dimensions=dict(data.get("dimensions") or {}),
             evidence=str(data.get("evidence") or ""),
+            acceptance_criteria=[
+                str(value) for value in data.get("acceptance_criteria") or []
+            ],
+            expected_files=[str(value) for value in data.get("expected_files") or []],
+            focused_commands=[
+                str(value) for value in data.get("focused_commands") or []
+            ],
+            work_item_id=str(data.get("work_item_id") or ""),
         )
 
 
@@ -63,6 +76,7 @@ class WorkItem:
     title: str
     objective: str = ""
     acceptance_ids: list[str] = field(default_factory=list)
+    acceptance_criteria: list[str] = field(default_factory=list)
     expected_files: list[str] = field(default_factory=list)
     focused_commands: list[str] = field(default_factory=list)
     source: str = "slice"  # slice | candidate
@@ -81,6 +95,9 @@ class WorkItem:
             title=str(data.get("title") or ""),
             objective=str(data.get("objective") or ""),
             acceptance_ids=list(data.get("acceptance_ids") or []),
+            acceptance_criteria=[
+                str(value) for value in data.get("acceptance_criteria") or []
+            ],
             expected_files=list(data.get("expected_files") or []),
             focused_commands=list(data.get("focused_commands") or []),
             source=str(data.get("source") or "slice"),
@@ -94,14 +111,23 @@ class WorkItem:
 class SliceAdapter:
     @staticmethod
     def to_work_item(plan: SlicePlan) -> WorkItem:
+        probe = PlanCandidate(
+            id=plan.id,
+            title=plan.title,
+            summary=plan.objective,
+            files={Path(path) for path in plan.expected_files},
+            focused_test_commands=tuple(plan.focused_commands),
+        )
         return WorkItem(
             id=plan.id,
             title=plan.title,
             objective=plan.objective,
             acceptance_ids=list(plan.acceptance_ids),
+            acceptance_criteria=[plan.objective] if plan.objective else [],
             expected_files=list(plan.expected_files),
             focused_commands=list(plan.focused_commands),
             source="slice",
+            fingerprint=PlanScheduler().fingerprint(probe),
             status=plan.status,
             attempts=plan.attempts,
             commit_sha=plan.commit_sha,
@@ -125,14 +151,16 @@ class SliceAdapter:
 class CandidateAdapter:
     @staticmethod
     def to_work_item(candidate: PlanCandidate) -> WorkItem:
+        fingerprint = candidate.fingerprint or PlanScheduler().fingerprint(candidate)
         return WorkItem(
             id=candidate.id,
             title=candidate.title,
             objective=candidate.summary,
+            acceptance_criteria=[candidate.summary] if candidate.summary else [],
             expected_files=sorted(str(path) for path in candidate.files),
             focused_commands=list(candidate.focused_test_commands),
             source="candidate",
-            fingerprint=candidate.fingerprint,
+            fingerprint=fingerprint,
         )
 
     @staticmethod
@@ -150,13 +178,15 @@ class CandidateAdapter:
 def candidate_to_slice(
     candidate: ImprovementCandidate, iteration: int, index: int
 ) -> SlicePlan:
+    work_item_id = candidate.work_item_id or f"iter{iteration}-{index + 1}"
+    candidate.work_item_id = work_item_id
     return SlicePlan(
-        id=f"iter{iteration}-{index + 1}",
+        id=work_item_id,
         title=candidate.title,
         objective=candidate.description,
         acceptance_ids=[],
-        expected_files=[],
-        focused_commands=[],
+        expected_files=list(candidate.expected_files),
+        focused_commands=list(candidate.focused_commands),
     )
 
 
@@ -185,8 +215,7 @@ class QualitySnapshot:
             goal_coverage=float(data.get("goal_coverage") or 0.0),
             quality_score=float(data.get("quality_score") or 0.0),
             hard_gates_passed=bool(data.get("hard_gates_passed", False)),
-            architecture_quality=float(
-                data.get("architecture_quality") or 0.0),
+            architecture_quality=float(data.get("architecture_quality") or 0.0),
             blocker_count=int(data.get("blocker_count") or 0),
             risks=list(data.get("risks") or []),
             created_at=str(data.get("created_at") or _now()),
@@ -238,21 +267,26 @@ class HarnessRun:
     id: str
     project_name: str
     workspace: str
-    mode: str  # greenfield | brownfield
+    mode: str  # greenfield | brownfield | mixed
     original_goal: str
     stage: str = "init"
     status: str = "pending"
     options: HarnessOptions = field(default_factory=HarnessOptions)
+    product_spec: dict[str, Any] = field(default_factory=dict)
+    architecture: dict[str, Any] = field(default_factory=dict)
     greenfield_run: GreenfieldRun | None = None
     work_items: list[WorkItem] = field(default_factory=list)
-    improvement_candidates: list[ImprovementCandidate] = field(
-        default_factory=list
-    )
+    improvement_candidates: list[ImprovementCandidate] = field(default_factory=list)
     quality_history: list[QualitySnapshot] = field(default_factory=list)
     stop_state: dict[str, Any] = field(default_factory=dict)
     research_reports: list[dict[str, Any]] = field(default_factory=list)
     work_item_plans: dict[str, str] = field(default_factory=dict)
     knowledge_events: list[dict[str, Any]] = field(default_factory=list)
+    decisions: list[dict[str, Any]] = field(default_factory=list)
+    experiments: list[dict[str, Any]] = field(default_factory=list)
+    failures: list[dict[str, Any]] = field(default_factory=list)
+    insights: list[dict[str, Any]] = field(default_factory=list)
+    knowledge_cursor: int = 0
     iteration: int = 0
     spent: float = 0.0
     started_at: str = field(default_factory=_now)
@@ -262,18 +296,24 @@ class HarnessRun:
         return {
             **asdict(self),
             "greenfield_run": self.greenfield_run.to_dict()
-            if self.greenfield_run else None,
+            if self.greenfield_run
+            else None,
             "work_items": [item.to_dict() for item in self.work_items],
             "improvement_candidates": [
                 item.to_dict() for item in self.improvement_candidates
             ],
-            "quality_history": [
-                item.to_dict() for item in self.quality_history
-            ],
+            "quality_history": [item.to_dict() for item in self.quality_history],
             "options": self.options.to_dict(),
+            "product_spec": dict(self.product_spec),
+            "architecture": dict(self.architecture),
             "research_reports": list(self.research_reports),
             "work_item_plans": dict(self.work_item_plans),
             "knowledge_events": list(self.knowledge_events),
+            "decisions": list(self.decisions),
+            "experiments": list(self.experiments),
+            "failures": list(self.failures),
+            "insights": list(self.insights),
+            "knowledge_cursor": self.knowledge_cursor,
         }
 
     @classmethod
@@ -288,8 +328,11 @@ class HarnessRun:
             stage=str(data.get("stage") or "init"),
             status=str(data.get("status") or "pending"),
             options=HarnessOptions.from_dict(data.get("options")),
+            product_spec=dict(data.get("product_spec") or {}),
+            architecture=dict(data.get("architecture") or {}),
             greenfield_run=GreenfieldRun.from_dict(greenfield_raw)
-            if greenfield_raw else None,
+            if greenfield_raw
+            else None,
             work_items=[
                 WorkItem.from_dict(item) for item in data.get("work_items") or []
             ],
@@ -303,7 +346,8 @@ class HarnessRun:
             ],
             stop_state=dict(data.get("stop_state") or {}),
             research_reports=[
-                dict(entry) for entry in data.get("research_reports") or []
+                dict(entry)
+                for entry in data.get("research_reports") or []
                 if isinstance(entry, dict)
             ],
             work_item_plans={
@@ -311,9 +355,23 @@ class HarnessRun:
                 for key, value in (data.get("work_item_plans") or {}).items()
             },
             knowledge_events=[
-                dict(e) for e in data.get("knowledge_events") or []
+                dict(e)
+                for e in data.get("knowledge_events") or []
                 if isinstance(e, dict)
             ],
+            decisions=[
+                dict(e) for e in data.get("decisions") or [] if isinstance(e, dict)
+            ],
+            experiments=[
+                dict(e) for e in data.get("experiments") or [] if isinstance(e, dict)
+            ],
+            failures=[
+                dict(e) for e in data.get("failures") or [] if isinstance(e, dict)
+            ],
+            insights=[
+                dict(e) for e in data.get("insights") or [] if isinstance(e, dict)
+            ],
+            knowledge_cursor=max(0, int(data.get("knowledge_cursor") or 0)),
             iteration=int(data.get("iteration") or 0),
             spent=float(data.get("spent") or 0.0),
             started_at=str(data.get("started_at") or _now()),

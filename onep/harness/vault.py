@@ -1,7 +1,9 @@
 """Two-layer Obsidian vault writer: global + project, plain Markdown."""
+
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
@@ -9,7 +11,11 @@ from typing import Any
 import yaml
 
 PROJECT_SECTIONS = {
-    "Sessions", "Decisions", "Experiments", "Failures", "Insights",
+    "Sessions",
+    "Decisions",
+    "Experiments",
+    "Failures",
+    "Insights",
 }
 
 _SECTION_TO_FOLDER = {
@@ -42,6 +48,27 @@ def global_vault_root() -> Path:
     return Path.home() / ".onep" / "vault"
 
 
+def project_vault_root(workspace: Path) -> Path:
+    """Per-project override from .onep/config.yaml, else the local default."""
+    workspace = Path(workspace).resolve()
+    path = workspace / ".onep" / "config.yaml"
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        configured = str(
+            (raw.get("knowledge") or {}).get("project_vault_root") or ""
+        ).strip()
+        if configured:
+            candidate = Path(configured).expanduser()
+            return (
+                (workspace / candidate).resolve()
+                if not candidate.is_absolute()
+                else candidate.resolve()
+            )
+    except (OSError, yaml.YAMLError, AttributeError, TypeError):
+        pass
+    return workspace / ".onep" / "knowledge"
+
+
 class VaultWriter:
     """Filesystem-safe Markdown writes for both Obsidian vault layers.
 
@@ -50,18 +77,17 @@ class VaultWriter:
     (Engineering/Principles, Engineering/Patterns, Engineering/Articles).
     """
 
-    def __init__(
-        self, global_root: Path, project_root: Path | None = None
-    ) -> None:
+    def __init__(self, global_root: Path, project_root: Path | None = None) -> None:
         self.global_root = Path(global_root).resolve()
-        self.project_root = (
-            Path(project_root).resolve() if project_root else None
-        )
+        self.project_root = Path(project_root).resolve() if project_root else None
 
     @staticmethod
     def sanitize(title: str) -> str:
         text = " ".join(str(title or "").split()).lower()
-        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", text)
+        # ``\w`` is Unicode-aware in Python, so CJK and other letter/digit
+        # titles remain distinct instead of all collapsing to ``note.md``.
+        # Path separators and punctuation are still replaced.
+        slug = re.sub(r"[^\w.-]+", "-", text, flags=re.UNICODE)
         slug = slug.strip(".-_")[:80]
         return slug or "note"
 
@@ -69,9 +95,7 @@ class VaultWriter:
     def render_frontmatter(frontmatter: dict[str, Any]) -> str:
         return (
             "---\n"
-            + yaml.safe_dump(
-                frontmatter, allow_unicode=True, sort_keys=False
-            ).rstrip()
+            + yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).rstrip()
             + "\n---\n"
         )
 
@@ -88,7 +112,10 @@ class VaultWriter:
 
     @classmethod
     def event_note_slug(cls, event: dict[str, Any]) -> str:
-        return cls.sanitize(cls.event_note_title(event))
+        identity = json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
+        prefix = f"{int(event.get('iteration') or 0)}-{event.get('type') or 'note'}"
+        return cls.sanitize(f"{prefix}-{cls.event_note_title(event)}-{digest}")
 
     def _resolve_section(self, section: str) -> Path:
         section = str(section).strip("/")
@@ -106,9 +133,7 @@ class VaultWriter:
         try:
             resolved.relative_to(root)
         except ValueError as exc:
-            raise ValueError(
-                f"section escapes vault root: {section!r}"
-            ) from exc
+            raise ValueError(f"section escapes vault root: {section!r}") from exc
         return resolved
 
     def note_path(self, section: str, slug: str) -> Path:
@@ -128,9 +153,7 @@ class VaultWriter:
         path.write_text(content, encoding="utf-8")
         return path
 
-    def write_json(
-        self, section: str, filename: str, data: dict[str, Any]
-    ) -> Path:
+    def write_json(self, section: str, filename: str, data: dict[str, Any]) -> Path:
         directory = self._resolve_section(section)
         safe_name = self.sanitize(Path(str(filename)).name)
         if not safe_name.endswith(".json"):

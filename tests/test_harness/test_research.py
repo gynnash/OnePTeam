@@ -23,6 +23,12 @@ class FakeClient:
         self.readme_calls.append(full_name)
         return self.readmes.get(full_name, "")
 
+    def fetch_top_tree(self, full_name, max_entries=30):
+        return ["src", "src/parse.py", "README.md"]
+
+    def fetch_file(self, full_name, path, max_chars=6000):
+        return "def parse(value):\n    return value\n"
+
 
 class ScriptedLLM:
     """Returns responses per stage; research makes 3 calls in full mode."""
@@ -42,14 +48,18 @@ class ScriptedLLM:
         return self.synthesis
 
 
-CARDS = ('{"cards": [{"repo": "cli/repo", "pattern": "builder", '
-         '"module_boundaries": ["parse"], "data_flow": "in -> out", '
-         '"evidence_files": ["src/parse.py"], "strengths": ["clean"], '
-         '"weaknesses": ["slow"]}]}')
-SYNTHESIS = ('{"evidence": [{"claim": "builders win", '
-             '"source_repos": ["cli/repo"], "detail": "scale fits"}], '
-             '"tradeoffs": [{"option": "builder", "decision": "adopt", '
-             '"reason": "fits", "source_repos": ["cli/repo"]}]}')
+CARDS = (
+    '{"cards": [{"repo": "cli/repo", "pattern": "builder", '
+    '"module_boundaries": ["parse"], "data_flow": "in -> out", '
+    '"evidence_files": ["src/parse.py"], "strengths": ["clean"], '
+    '"weaknesses": ["slow"]}]}'
+)
+SYNTHESIS = (
+    '{"evidence": [{"claim": "builders win", '
+    '"source_repos": ["cli/repo"], "detail": "scale fits"}], '
+    '"tradeoffs": [{"option": "builder", "decision": "adopt", '
+    '"reason": "fits", "source_repos": ["cli/repo"]}]}'
+)
 
 
 def _stage(llm, client=None):
@@ -58,15 +68,21 @@ def _stage(llm, client=None):
 
 def test_full_mode_searches_extracts_and_synthesizes(tmp_path):
     client = FakeClient(
-        [RepoInfo(full_name="cli/repo", stargazers_count=900,
-                  pushed_at="2026-06-01T00:00:00Z")],
+        [
+            RepoInfo(
+                full_name="cli/repo",
+                stargazers_count=900,
+                pushed_at="2026-06-01T00:00:00Z",
+            )
+        ],
         {"cli/repo": "# great cli\n"},
     )
-    llm = ScriptedLLM(
-        '{"questions": ["cli orchestration patterns"]}', CARDS, SYNTHESIS)
+    llm = ScriptedLLM('{"questions": ["cli orchestration patterns"]}', CARDS, SYNTHESIS)
     report = _stage(llm, client=client).run(
-        goal="build a CLI", acceptance_summary="- REQ-1 ok",
-        architecture_summary="selected: python", iteration=1,
+        goal="build a CLI",
+        acceptance_summary="- REQ-1 ok",
+        architecture_summary="selected: python",
+        iteration=1,
         run_dir=tmp_path / "runs" / "r-1",
     )
     assert report.mode == "full"
@@ -83,10 +99,17 @@ def test_full_mode_searches_extracts_and_synthesizes(tmp_path):
 
 def test_full_mode_skips_without_questions(tmp_path):
     llm = ScriptedLLM('{"questions": []}', "", "")
-    client = FakeClient([RepoInfo(full_name="cli/repo", stargazers_count=1,
-                                  pushed_at="2026-06-01T00:00:00Z")], {})
-    report = _stage(llm, client=client).run(
-        "g", "", "", 1, tmp_path / "runs" / "r-1")
+    client = FakeClient(
+        [
+            RepoInfo(
+                full_name="cli/repo",
+                stargazers_count=1,
+                pushed_at="2026-06-01T00:00:00Z",
+            )
+        ],
+        {},
+    )
+    report = _stage(llm, client=client).run("g", "", "", 1, tmp_path / "runs" / "r-1")
     assert report.mode == "skipped"
     assert report.skip_reason == "no_research_questions"
     assert client.searches == []
@@ -95,8 +118,7 @@ def test_full_mode_skips_without_questions(tmp_path):
 def test_full_mode_skips_without_repos(tmp_path):
     llm = ScriptedLLM('{"questions": ["q"]}', "", "")
     client = FakeClient([], {})
-    report = _stage(llm, client=client).run(
-        "g", "", "", 1, tmp_path / "runs" / "r-1")
+    report = _stage(llm, client=client).run("g", "", "", 1, tmp_path / "runs" / "r-1")
     assert report.mode == "skipped"
     assert report.skip_reason == "no_matching_repositories"
 
@@ -108,17 +130,28 @@ def test_full_mode_degrades_to_skipped_on_github_unavailable(tmp_path):
 
     llm = ScriptedLLM('{"questions": ["q"]}', "", "")
     report = _stage(llm, client=FailingClient()).run(
-        "g", "", "", 1, tmp_path / "runs" / "r-1")
+        "g", "", "", 1, tmp_path / "runs" / "r-1"
+    )
     assert report.mode == "skipped"
     assert "GitHubUnavailable" in report.skip_reason
 
 
 def test_lightweight_mode_skips_network_and_uses_local_evidence(tmp_path):
     llm = ScriptedLLM(SYNTHESIS, "", "")
-    client = FakeClient([RepoInfo(full_name="x/y", stargazers_count=1,
-                                  pushed_at="2026-06-01T00:00:00Z")], {})
+    client = FakeClient(
+        [
+            RepoInfo(
+                full_name="x/y", stargazers_count=1, pushed_at="2026-06-01T00:00:00Z"
+            )
+        ],
+        {},
+    )
     report = _stage(llm, client=client).run(
-        "g", "", "selected: python", 2, tmp_path / "runs" / "r-1",
+        "g",
+        "",
+        "selected: python",
+        2,
+        tmp_path / "runs" / "r-1",
         mode="lightweight",
     )
     assert report.mode == "lightweight"
@@ -130,7 +163,8 @@ def test_lightweight_mode_skips_network_and_uses_local_evidence(tmp_path):
 def test_lightweight_mode_without_evidence_is_skipped(tmp_path):
     llm = ScriptedLLM('{"evidence": []}', "", "")
     report = _stage(llm, client=FakeClient([], {})).run(
-        "g", "", "", 2, tmp_path / "runs" / "r-1", mode="lightweight")
+        "g", "", "", 2, tmp_path / "runs" / "r-1", mode="lightweight"
+    )
     assert report.mode == "skipped"
     assert report.skip_reason == "lightweight_no_evidence"
 
@@ -152,8 +186,7 @@ def test_track_callback_fires_after_run(tmp_path):
         tracked.append((tracker, stage))
 
     stage = ResearchStage(llm, client=FakeClient([], {}), track=track)
-    stage.run("g", "", "", 1, tmp_path / "runs" / "r-1",
-              tracker="the-tracker")
+    stage.run("g", "", "", 1, tmp_path / "runs" / "r-1", tracker="the-tracker")
     assert tracked == [("the-tracker", "harness_researcher")]
 
 
@@ -165,10 +198,16 @@ def test_full_mode_skips_with_readme_fetch_failed(tmp_path):
 
     llm = ScriptedLLM('{"questions": ["cli orchestration patterns"]}', "", "")
     client = FailingReadmeClient(
-        [RepoInfo(full_name="cli/repo", stargazers_count=900,
-                  pushed_at="2026-06-01T00:00:00Z")], {})
-    report = _stage(llm, client=client).run(
-        "g", "", "", 1, tmp_path / "runs" / "r-1")
+        [
+            RepoInfo(
+                full_name="cli/repo",
+                stargazers_count=900,
+                pushed_at="2026-06-01T00:00:00Z",
+            )
+        ],
+        {},
+    )
+    report = _stage(llm, client=client).run("g", "", "", 1, tmp_path / "runs" / "r-1")
     assert report.mode == "skipped"
     assert report.skip_reason == "readme_fetch_failed"
 
@@ -176,7 +215,11 @@ def test_full_mode_skips_with_readme_fetch_failed(tmp_path):
 def test_lightweight_evidence_strips_invented_source_repos(tmp_path):
     llm = ScriptedLLM(SYNTHESIS, "", "")
     report = _stage(llm, client=FakeClient([], {})).run(
-        "g", "", "selected: python", 2, tmp_path / "runs" / "r-1",
+        "g",
+        "",
+        "selected: python",
+        2,
+        tmp_path / "runs" / "r-1",
         mode="lightweight",
     )
     assert report.evidence[0].source_repos == []
@@ -184,20 +227,28 @@ def test_lightweight_evidence_strips_invented_source_repos(tmp_path):
 
 def test_full_mode_evidence_filters_invented_source_repos(tmp_path):
     client = FakeClient(
-        [RepoInfo(full_name="cli/repo", stargazers_count=900,
-                  pushed_at="2026-06-01T00:00:00Z")],
+        [
+            RepoInfo(
+                full_name="cli/repo",
+                stargazers_count=900,
+                pushed_at="2026-06-01T00:00:00Z",
+            )
+        ],
         {"cli/repo": "# great cli\n"},
     )
-    synthesis = ('{"evidence": [{"claim": "builders win", '
-                 '"source_repos": ["cli/repo", "ghost/repo"], '
-                 '"detail": "scale fits"}], '
-                 '"tradeoffs": [{"option": "builder", "decision": "adopt", '
-                 '"reason": "fits", "source_repos": ["cli/repo"]}]}')
-    llm = ScriptedLLM(
-        '{"questions": ["cli orchestration patterns"]}', CARDS, synthesis)
+    synthesis = (
+        '{"evidence": [{"claim": "builders win", '
+        '"source_repos": ["cli/repo", "ghost/repo"], '
+        '"detail": "scale fits"}], '
+        '"tradeoffs": [{"option": "builder", "decision": "adopt", '
+        '"reason": "fits", "source_repos": ["cli/repo"]}]}'
+    )
+    llm = ScriptedLLM('{"questions": ["cli orchestration patterns"]}', CARDS, synthesis)
     report = _stage(llm, client=client).run(
-        goal="build a CLI", acceptance_summary="- REQ-1 ok",
-        architecture_summary="selected: python", iteration=1,
+        goal="build a CLI",
+        acceptance_summary="- REQ-1 ok",
+        architecture_summary="selected: python",
+        iteration=1,
         run_dir=tmp_path / "runs" / "r-1",
     )
     assert report.mode == "full"

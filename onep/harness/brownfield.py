@@ -4,13 +4,13 @@ UNDERSTAND scans the existing codebase into PlanCandidates; BUILD develops
 each candidate through the hardened OptimizeCoordinator kernel. The Product
 Loop (REFLECT -> DISCOVER -> PRIORITIZE -> STOP) is shared with greenfield.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Callable
 
 from onep.harness.models import CandidateAdapter, WorkItem
-from onep.llm.adapters import LLMAdapter
 from onep.strategy.analyze_pipeline import analyze_source, candidate_from_item
 from onep.strategy.git_session import GitRunSession
 from onep.strategy.models import StrategyItem, classify_impact
@@ -42,18 +42,14 @@ class BrownfieldUnderstandStage:
         test_commands: tuple[str, ...],
         tracker=None,
     ) -> tuple[list[PlanCandidate], dict[str, str]]:
-        items = self.analyzer(
-            workspace, self.llm, tracker, project_name
-        )
+        items = self.analyzer(workspace, self.llm, tracker, project_name)
         candidates: list[PlanCandidate] = []
         plans: dict[str, str] = {}
         for index, item in enumerate(items, 1):
             item.impact = classify_impact(
                 item.title, item.summary, item.tags, item.impact
             )
-            generated = self.planner(
-                item, workspace, self.llm, plan_index=index
-            )
+            generated = self.planner(item, workspace, self.llm, plan_index=index)
             candidate = candidate_from_item(item, test_commands, generated)
             candidates.append(candidate)
             plans[candidate.id] = generated.plan_markdown
@@ -103,12 +99,11 @@ class BrownfieldBuildStage:
         integration_passed = True
         if not updated:
             return {
-                "items": updated, "records": records,
+                "items": updated,
+                "records": records,
                 "integration_passed": True,
             }
-        git_session = self.session_factory(
-            self.workspace, self.run_dir, self.run_id
-        )
+        git_session = self.session_factory(self.workspace, self.run_dir, self.run_id)
         git_session.create_integration_branch()
         for item in updated:
             if item.status != "pending":
@@ -117,16 +112,14 @@ class BrownfieldBuildStage:
             coordinator = self.coordinator_factory(
                 OptimizeEngine(),
                 PlanTestRunner(self.test_timeout),
-                ReviewAgent(LLMAdapter()),
+                ReviewAgent(self.llm),
                 git_session,
                 llm=self.llm,
                 recorder=self.recorder,
                 cost_tracker=self.tracker,
                 project_context=self.project_context,
             )
-            session = git_session.create_plan_session(
-                candidate.id, candidate.title
-            )
+            session = git_session.create_plan_session(candidate.id, candidate.title)
             record = coordinator.develop_plan(
                 candidate, plans.get(item.id, ""), session
             )
@@ -143,6 +136,7 @@ class BrownfieldBuildStage:
                 item.status = "failed"
                 integration_passed = False
         return {
-            "items": updated, "records": records,
+            "items": updated,
+            "records": records,
             "integration_passed": integration_passed,
         }

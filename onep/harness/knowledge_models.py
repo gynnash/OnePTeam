@@ -1,4 +1,5 @@
 """Knowledge event models and JSONL persistence for the Knowledge Loop."""
+
 from __future__ import annotations
 
 import json
@@ -109,6 +110,5 @@ def save_distillations(run_dir: Path, events: list[KnowledgeEvent]) -> Path:
 
 def load_distillations(run_dir: Path) -> list[KnowledgeEvent]:
     return [
-        KnowledgeEvent.from_dict(raw)
-        for raw in load_jsonl(distillations_path(run_dir))
+        KnowledgeEvent.from_dict(raw) for raw in load_jsonl(distillations_path(run_dir))
     ]

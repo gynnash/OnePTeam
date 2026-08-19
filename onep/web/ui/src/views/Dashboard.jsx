@@ -4,17 +4,19 @@ import { createProject, getProjects } from '../api.js';
 export default function Dashboard({ navigate }) {
   const [projects, setProjects] = useState([]);
   const [requirement, setRequirement] = useState('');
+  const [workspacePath, setWorkspacePath] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const load = () => getProjects().then((data) => setProjects(data.projects)).catch((e) => setError(e.message));
   useEffect(() => { load(); const timer = setInterval(load, 3000); return () => clearInterval(timer); }, []);
   const create = async (event) => {
     event.preventDefault();
-    if (!requirement.trim() || busy) return;
+    if ((!requirement.trim() && !workspacePath.trim()) || busy) return;
     setBusy(true); setError('');
     try {
-      await createProject({ requirement: requirement.trim() });
+      await createProject({ requirement: requirement.trim(), workspace_path: workspacePath.trim() });
       setRequirement('');
+      setWorkspacePath('');
       await load();
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   };
@@ -23,6 +25,7 @@ export default function Dashboard({ navigate }) {
       <h2>Projects</h2>
       <form className="create-bar" onSubmit={create}>
         <input value={requirement} onChange={(e) => setRequirement(e.target.value)} placeholder="One-line requirement" />
+        <input value={workspacePath} onChange={(e) => setWorkspacePath(e.target.value)} placeholder="Existing repository path (optional)" />
         <button type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create'}</button>
       </form>
       {error && <p className="error">{error}</p>}

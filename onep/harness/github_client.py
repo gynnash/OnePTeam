@@ -1,4 +1,5 @@
 """Minimal GitHub API client for the RESEARCH stage (stdlib only)."""
+
 from __future__ import annotations
 
 import json
@@ -37,9 +38,7 @@ class GitHubSearchClient:
         timeout: float = 10.0,
         now: Callable[[], datetime] | None = None,
     ) -> None:
-        self.token = token if token is not None else os.environ.get(
-            "GITHUB_TOKEN", ""
-        )
+        self.token = token if token is not None else os.environ.get("GITHUB_TOKEN", "")
         self._urlopen = urlopen or urllib.request.urlopen
         self._timeout = timeout
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -93,16 +92,18 @@ class GitHubSearchClient:
             if not isinstance(item, dict):
                 continue
             topics = item.get("topics") or []
-            repos.append(RepoInfo(
-                full_name=str(item.get("full_name") or ""),
-                url=str(item.get("html_url") or ""),
-                language=str(item.get("language") or ""),
-                topics=tuple(str(topic) for topic in topics),
-                stargazers_count=int(item.get("stargazers_count") or 0),
-                description=str(item.get("description") or ""),
-                pushed_at=str(item.get("pushed_at") or ""),
-                archived=bool(item.get("archived", False)),
-            ))
+            repos.append(
+                RepoInfo(
+                    full_name=str(item.get("full_name") or ""),
+                    url=str(item.get("html_url") or ""),
+                    language=str(item.get("language") or ""),
+                    topics=tuple(str(topic) for topic in topics),
+                    stargazers_count=int(item.get("stargazers_count") or 0),
+                    description=str(item.get("description") or ""),
+                    pushed_at=str(item.get("pushed_at") or ""),
+                    archived=bool(item.get("archived", False)),
+                )
+            )
         return repos
 
     def filter_repos(
@@ -126,7 +127,7 @@ class GitHubSearchClient:
             kept.values(),
             key=lambda repo: (-repo.stargazers_count, repo.full_name),
         )
-        return ordered[:max(0, max_repos)]
+        return ordered[: max(0, max_repos)]
 
     def _recent(self, pushed_at: str, max_age_days: int) -> bool:
         try:
@@ -150,10 +151,8 @@ class GitHubSearchClient:
             pass  # raw markdown is not JSON; use it as-is
         return body[:max_chars]
 
-    def fetch_top_tree(
-        self, full_name: str, max_entries: int = 30
-    ) -> list[str]:
-        data = self._get_json(f"/repos/{full_name}/git/trees/HEAD")
+    def fetch_top_tree(self, full_name: str, max_entries: int = 200) -> list[str]:
+        data = self._get_json(f"/repos/{full_name}/git/trees/HEAD?recursive=1")
         paths = []
         for entry in data.get("tree") or []:
             if not isinstance(entry, dict):
@@ -164,3 +163,11 @@ class GitHubSearchClient:
             if len(paths) >= max_entries:
                 break
         return paths
+
+    def fetch_file(self, full_name: str, path: str, max_chars: int = 6000) -> str:
+        safe_path = urllib.parse.quote(path.strip("/"), safe="/")
+        body = self._get(
+            f"/repos/{full_name}/contents/{safe_path}",
+            "application/vnd.github.raw+json",
+        )
+        return body[:max_chars]

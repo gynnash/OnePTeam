@@ -1145,6 +1145,75 @@ def test_final_verification_marks_pending_acceptance_with_exact_command_evidence
     assert item.evidence == ["final-verification:declared-commands-passed"]
 
 
+def test_final_verification_reuses_fresh_same_run_assessment(tmp_path):
+    class FakeGit:
+        @staticmethod
+        def status(*args):
+            return ""
+
+        @staticmethod
+        def diff(*args):
+            raise AssertionError("reused assessment must not invoke final review")
+
+    class NoRepeatGateRunner:
+        @staticmethod
+        def run(*args):
+            raise AssertionError("reused assessment must not rerun quality gates")
+
+        @staticmethod
+        def deploy(*args):
+            return None
+
+    run = GreenfieldRun(
+        id="run",
+        project_name="demo",
+        requirement="demo",
+        workspace=str(tmp_path),
+        base_commit="base",
+        last_assessment_satisfied=True,
+    )
+    contract = AcceptanceContract(
+        [
+            AcceptanceItem(
+                id="A1",
+                priority="P0",
+                behavior="works",
+                commands=["pytest -q"],
+                evidence=["full-requirement-assessment:gates-and-review-passed"],
+                status="passed",
+            )
+        ]
+    )
+    session = SimpleNamespace(
+        workspace=tmp_path,
+        repo=SimpleNamespace(
+            git=FakeGit(),
+            head=SimpleNamespace(commit=SimpleNamespace(hexsha="abc123")),
+        ),
+    )
+    console = Console(record=True)
+    recorder = GreenfieldRecorder(tmp_path / ".onep/run", run, console)
+    engine = GreenfieldEngine(console=console, llm=FakeLLM())
+    engine._verified_assessment_fingerprint = engine._assessment_fingerprint(
+        session, ["pytest -q"], contract
+    )
+
+    engine._final_verify(
+        run,
+        contract,
+        session,
+        ["pytest -q"],
+        NoRepeatGateRunner(),
+        recorder,
+        CostTracker(),
+        allow_repair=False,
+    )
+
+    output = console.export_text()
+    assert "复用结果并跳过重复回归" in output
+    assert "复用本次完整需求语义评审" in output
+
+
 def test_hardening_ids_are_unique_and_bounded_by_prefix_count():
     run = GreenfieldRun(
         id="run",

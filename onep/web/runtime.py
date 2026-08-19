@@ -1,4 +1,5 @@
 """Runtime helpers shared by the server, the API routers, and the CLI."""
+
 from __future__ import annotations
 
 import json
@@ -8,6 +9,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from onep.harness.persistence import harness_run_path
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8311
@@ -35,6 +38,7 @@ def web_config() -> tuple[str, int]:
     """(host, port) from config.yaml web: section; tolerant of missing config."""
     try:
         import yaml
+
         raw = yaml.safe_load(_config_path().read_text(encoding="utf-8")) or {}
         web = raw.get("web") or {}
         host = str(web.get("host") or DEFAULT_HOST)
@@ -46,6 +50,7 @@ def web_config() -> tuple[str, int]:
 
 def managed_root() -> Path:
     from onep.config import load_config
+
     return Path(load_config().project.root_dir).expanduser() / "projects"
 
 
@@ -73,7 +78,9 @@ def spawn_run(name: str, workspace: Path) -> dict[str, Any] | None:
         process = subprocess.Popen(
             [sys.executable, "-c", _RUN_ENTRY, name],
             cwd=str(workspace),
-            stdout=log_handle, stderr=subprocess.STDOUT, text=True,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
     except OSError:
         log_handle.close()
@@ -109,8 +116,9 @@ def event_stream(workspace, poll: float = POLL_INTERVAL, max_events: int | None 
     and events reset the counter.
     """
     from onep.web import state as harness_state
+
     flow_path = harness_state.flow_events_path(workspace)
-    run_yaml = harness_state.harness_run_path(workspace)
+    run_yaml = harness_run_path(workspace)
     run_dir = harness_state.resolve_run_dir(workspace)
     tail_paths = [
         (flow_path, "flow"),
@@ -127,6 +135,14 @@ def event_stream(workspace, poll: float = POLL_INTERVAL, max_events: int | None 
     empty_polls = 0
     while max_events is None or emitted < max_events:
         cycle_start = emitted
+        resolved_run_dir = harness_state.resolve_run_dir(workspace)
+        if resolved_run_dir != run_dir:
+            run_dir = resolved_run_dir
+            tail_paths = [
+                (flow_path, "flow"),
+                (run_dir / "events.jsonl" if run_dir else None, "log"),
+                (run_dir / "distillations.jsonl" if run_dir else None, "distill"),
+            ]
         new_run_fp = _fingerprint(run_yaml)
         if new_run_fp != run_fp:
             run_fp = new_run_fp

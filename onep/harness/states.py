@@ -1,4 +1,5 @@
 """Unified harness stage machine."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ class HarnessStage(str, Enum):
     DESIGN = "design"
     PLAN = "plan"
     BUILD = "build"
+    VERIFY = "verify"
+    REVIEW = "review"
     REFLECT = "reflect"
     DISCOVER = "discover"
     PRIORITIZE = "prioritize"
@@ -24,32 +27,59 @@ class HarnessStage(str, Enum):
 _ALLOWED: dict[HarnessStage, set[HarnessStage]] = {
     HarnessStage.INIT: {HarnessStage.UNDERSTAND},
     HarnessStage.UNDERSTAND: {
-        HarnessStage.RESEARCH, HarnessStage.PLAN, HarnessStage.STOP,
-        HarnessStage.FAILED, HarnessStage.CANCELLED,
+        HarnessStage.RESEARCH,
+        HarnessStage.PLAN,
+        HarnessStage.STOP,
+        HarnessStage.FAILED,
+        HarnessStage.CANCELLED,
     },
     HarnessStage.RESEARCH: {
-        HarnessStage.DESIGN, HarnessStage.FAILED, HarnessStage.CANCELLED,
+        HarnessStage.DESIGN,
+        HarnessStage.FAILED,
+        HarnessStage.CANCELLED,
     },
     HarnessStage.DESIGN: {
-        HarnessStage.PLAN, HarnessStage.FAILED, HarnessStage.CANCELLED,
+        HarnessStage.PLAN,
+        HarnessStage.FAILED,
+        HarnessStage.CANCELLED,
     },
     HarnessStage.PLAN: {
-        HarnessStage.BUILD, HarnessStage.STOP,
-        HarnessStage.FAILED, HarnessStage.CANCELLED,
+        HarnessStage.BUILD,
+        HarnessStage.STOP,
+        HarnessStage.FAILED,
+        HarnessStage.CANCELLED,
     },
     HarnessStage.BUILD: {
-        HarnessStage.REFLECT, HarnessStage.FAILED, HarnessStage.CANCELLED,
+        HarnessStage.VERIFY,
+        HarnessStage.FAILED,
+        HarnessStage.CANCELLED,
+    },
+    HarnessStage.VERIFY: {
+        HarnessStage.REVIEW,
+        HarnessStage.FAILED,
+        HarnessStage.CANCELLED,
+    },
+    HarnessStage.REVIEW: {
+        HarnessStage.REFLECT,
+        HarnessStage.FAILED,
+        HarnessStage.CANCELLED,
     },
     HarnessStage.REFLECT: {
-        HarnessStage.DISCOVER, HarnessStage.STOP,
-        HarnessStage.FAILED, HarnessStage.CANCELLED,
+        HarnessStage.DISCOVER,
+        HarnessStage.STOP,
+        HarnessStage.FAILED,
+        HarnessStage.CANCELLED,
     },
     HarnessStage.DISCOVER: {
-        HarnessStage.PRIORITIZE, HarnessStage.FAILED, HarnessStage.CANCELLED,
+        HarnessStage.PRIORITIZE,
+        HarnessStage.FAILED,
+        HarnessStage.CANCELLED,
     },
     HarnessStage.PRIORITIZE: {
-        HarnessStage.RESEARCH, HarnessStage.STOP,
-        HarnessStage.FAILED, HarnessStage.CANCELLED,
+        HarnessStage.RESEARCH,
+        HarnessStage.STOP,
+        HarnessStage.FAILED,
+        HarnessStage.CANCELLED,
     },
     HarnessStage.STOP: set(),
     HarnessStage.FAILED: set(),
@@ -92,11 +122,14 @@ class HarnessFlow:
         event = HarnessFlowEvent(stage, self.iteration, payload or {})
         self.events.append(event)
         if self.event_sink:
-            self.event_sink("flow_transition", {
-                "stage": stage.value,
-                "iteration": self.iteration,
-                **event.payload,
-            })
+            self.event_sink(
+                "flow_transition",
+                {
+                    "stage": stage.value,
+                    "iteration": self.iteration,
+                    **event.payload,
+                },
+            )
 
     def fail(self, message: str) -> None:
         if HarnessStage.FAILED in _ALLOWED[self.stage]:

@@ -9,6 +9,7 @@ from onep.greenfield.gates import (
 
 def test_discovers_python_and_node_quality_gates(tmp_path):
     (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n[tool.mypy]\n")
+    (tmp_path / "test_app.py").write_text("def test_app():\n    assert True\n")
     (tmp_path / "package.json").write_text(json.dumps({
         "scripts": {"test": "vitest", "lint": "eslint .", "build": "vite build"}
     }))
@@ -18,6 +19,12 @@ def test_discovers_python_and_node_quality_gates(tmp_path):
     assert "mypy ." in commands
     assert "npm run test" in commands
     assert "npm run build" in commands
+
+
+def test_does_not_infer_pytest_from_pyproject_without_tests(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+
+    assert "pytest -q" not in discover_quality_commands(tmp_path)
 
 
 def test_rejects_shell_composition_in_gate():

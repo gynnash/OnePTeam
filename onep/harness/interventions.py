@@ -5,6 +5,7 @@ The harness never waits on humans; humans write decisions to
 them at the next PRIORITIZE boundary. The web console writes through the
 documented REST endpoints; the engine applies through apply_candidate_decisions.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,8 +38,8 @@ def request_stop(workspace: Path) -> None:
     path = stop_request_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"requested_at": _now(), "source": "web"}) + "\n",
-        encoding="utf-8")
+        json.dumps({"requested_at": _now(), "source": "web"}) + "\n", encoding="utf-8"
+    )
 
 
 def load_candidate_decisions(workspace: Path) -> list[dict[str, Any]]:
@@ -65,7 +66,8 @@ def save_candidate_decisions(workspace: Path, decisions: list[dict[str, Any]]) -
     path = candidate_decisions_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temp_name = tempfile.mkstemp(
-        dir=str(path.parent), prefix="candidate-decisions-", suffix=".tmp")
+        dir=str(path.parent), prefix="candidate-decisions-", suffix=".tmp"
+    )
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as temp:
             for entry in decisions:
@@ -88,7 +90,8 @@ def record_candidate_decision(
     """Append one human decision. Returns the stored entry."""
     if decision not in VALID_DECISIONS:
         raise ValueError(
-            f"invalid decision {decision!r}; expected one of {VALID_DECISIONS}")
+            f"invalid decision {decision!r}; expected one of {VALID_DECISIONS}"
+        )
     if decision == "rescore":
         if score is None:
             raise ValueError("rescore requires a score")
@@ -118,9 +121,13 @@ def merged_candidates(run: HarnessRun, workspace: Path) -> list[dict[str, Any]]:
         row = candidate.to_dict()
         entry = latest.get(candidate.id)
         row["decision"] = (
-            {key: entry.get(key)
-             for key in ("decision", "score", "note", "applied", "created_at")}
-            if entry is not None else None)
+            {
+                key: entry.get(key)
+                for key in ("decision", "score", "note", "applied", "created_at")
+            }
+            if entry is not None
+            else None
+        )
         rows.append(row)
     return rows
 

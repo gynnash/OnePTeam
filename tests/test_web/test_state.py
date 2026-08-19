@@ -1,12 +1,23 @@
 import json
 from pathlib import Path
 
-from onep.harness.models import HarnessRun, HarnessOptions, QualitySnapshot, ImprovementCandidate
-from onep.harness.persistence import save_harness_run
+from onep.harness.models import (
+    HarnessRun,
+    HarnessOptions,
+    QualitySnapshot,
+    ImprovementCandidate,
+)
+from onep.harness.persistence import load_harness_run, save_harness_run
 from onep.persistence.models import Project, ProjectMode
 from onep.web.state import (
-    flow_events_path, last_flow_stage, log_entries, project_summaries,
-    resolve_run_dir, run_detail, run_summary, stage_history,
+    flow_events_path,
+    last_flow_stage,
+    log_entries,
+    project_summaries,
+    resolve_run_dir,
+    run_detail,
+    run_summary,
+    stage_history,
 )
 
 from tests.test_web.fixtures import seed_project
@@ -52,8 +63,20 @@ def test_run_detail_shape(tmp_path, monkeypatch):
     detail = run_detail(workspace)
     assert detail["original_goal"] == "build value"
     assert detail["stages"] == [
-        "init", "understand", "research", "design", "plan", "build",
-        "reflect", "discover", "prioritize", "stop", "failed", "cancelled",
+        "init",
+        "understand",
+        "research",
+        "design",
+        "plan",
+        "build",
+        "verify",
+        "review",
+        "reflect",
+        "discover",
+        "prioritize",
+        "stop",
+        "failed",
+        "cancelled",
     ]
     assert detail["stop_state"]["reason"] == "goals_satisfied"
     assert detail["stage_history"][-1]["stage"] == "stop"
@@ -64,8 +87,21 @@ def test_run_detail_shape(tmp_path, monkeypatch):
 
 def test_resolve_run_dir_greenfield(tmp_path, monkeypatch):
     workspace = seed_project(tmp_path, monkeypatch, name="demo")
-    assert resolve_run_dir(workspace) == workspace / ".onep" / "greenfield" / "runs" / "gf-1"
+    assert (
+        resolve_run_dir(workspace)
+        == workspace / ".onep" / "greenfield" / "runs" / "gf-1"
+    )
     assert resolve_run_dir(tmp_path / "nope") is None
+
+
+def test_resolve_run_dir_mixed_uses_greenfield_backend(tmp_path, monkeypatch):
+    workspace = seed_project(tmp_path, monkeypatch, name="demo")
+    run = load_harness_run(workspace)
+    run.mode = "mixed"
+    save_harness_run(run)
+    assert resolve_run_dir(workspace) == (
+        workspace / ".onep" / "greenfield" / "runs" / "gf-1"
+    )
 
 
 def test_log_entries_offset_and_limit(tmp_path, monkeypatch):
@@ -83,7 +119,7 @@ def test_last_flow_stage_skips_non_dict_lines(tmp_path, monkeypatch):
     flow_path = flow_events_path(workspace)
     flow_path.write_text(
         '"just a string"\n'
-        '42\n'
+        "42\n"
         '{"type": "flow_transition", "payload": "oops"}\n'
         '{"type": "flow_transition", "payload": {"stage": "build", "iteration": 2}}\n'
     )
@@ -97,4 +133,7 @@ def test_stage_history_skips_non_dict_payloads(tmp_path, monkeypatch):
         '{"type": "flow_transition", "payload": 42}\n'
         '{"type": "flow_transition", "payload": {"stage": "stop", "iteration": 1}}\n'
     )
-    assert [entry["stage"] for entry in stage_history(workspace)] == ["understand", "stop"]
+    assert [entry["stage"] for entry in stage_history(workspace)] == [
+        "understand",
+        "stop",
+    ]

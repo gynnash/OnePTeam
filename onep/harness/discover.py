@@ -1,5 +1,6 @@
 # onep/harness/discover.py
 """DISCOVER and PRIORITIZE stages of the Product Loop."""
+
 from __future__ import annotations
 
 import json
@@ -36,8 +37,11 @@ Quality snapshot (iteration {iteration}):
 Return JSON only with this shape:
 {{"candidates": [{{"id": "I-001", "title": "short title",
 "description": "concrete change",
-"evidence": "which acceptance item, test result, review finding, or code
-signal motivates this proposal"}}]}}
+"evidence": "start with an acceptance/work-item id, or
+test:/review:/code:/quality:/failure:, then the observed signal",
+"acceptance_criteria": ["observable outcome"],
+"expected_files": ["likely/relative/path"],
+"focused_commands": ["fast deterministic test command"]}}]}}
 Propose at most 5 candidates. Every proposal MUST cite observable evidence
 from the delivered product or its quality signals; speculative proposals
 without evidence are rejected. Prefer small, evidence-based improvements
@@ -52,7 +56,12 @@ def _json_object(output: str) -> dict[str, Any]:
         data = json.loads(text)
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, re.DOTALL)
-        data = json.loads(match.group(0)) if match else {}
+        if not match:
+            return {}
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return {}
     return data if isinstance(data, dict) else {}
 
 
@@ -85,11 +94,16 @@ class BrainstormStage:
             iteration=iteration,
             snapshot=snapshot.to_dict() if snapshot is not None else {},
         )
-        output = self.llm.invoke(
-            system_prompt=BRAINSTORM_SYSTEM,
-            user_prompt=prompt,
-            stage_name="harness_brainstorm",
-        )
+        try:
+            output = self.llm.invoke(
+                system_prompt=BRAINSTORM_SYSTEM,
+                user_prompt=prompt,
+                stage_name="harness_brainstorm",
+            )
+        except Exception:
+            if self.track and tracker is not None:
+                self.track(tracker, "harness_brainstorm")
+            return []
         if self.track and tracker is not None:
             self.track(tracker, "harness_brainstorm")
         data = _json_object(output or "")
@@ -103,9 +117,44 @@ class BrainstormStage:
                     title=str(raw.get("title") or ""),
                     description=str(raw.get("description") or ""),
                     evidence=str(raw.get("evidence") or ""),
+                    acceptance_criteria=[
+                        str(value) for value in raw.get("acceptance_criteria") or []
+                    ],
+                    expected_files=[
+                        str(value) for value in raw.get("expected_files") or []
+                    ],
+                    focused_commands=[
+                        str(value) for value in raw.get("focused_commands") or []
+                    ],
                 )
             )
-        return [c for c in candidates if c.title]
+        # Prompt instructions are not a safety boundary. Unsupported ideas do
+        # not enter scoring, where a plausible title could otherwise expand
+        # the product scope without any observable reason.
+        return [
+            candidate
+            for candidate in candidates
+            if candidate.title
+            and self._supported_evidence(
+                candidate.evidence, acceptance_summary, code_signals
+            )
+        ]
+
+    @staticmethod
+    def _supported_evidence(
+        evidence: str, acceptance_summary: str, code_signals: str
+    ) -> bool:
+        text = str(evidence or "").strip().casefold()
+        if not text:
+            return False
+        references = set()
+        for line in f"{acceptance_summary}\n{code_signals}".splitlines():
+            match = re.match(r"\s*-\s*([^\s\[]+)", line)
+            if match:
+                references.add(match.group(1).casefold())
+        if any(reference in text for reference in references):
+            return True
+        return text.startswith(("test:", "review:", "code:", "quality:", "failure:"))
 
 
 class PrioritizeStage:
@@ -130,7 +179,8 @@ class PrioritizeStage:
         pool (0.5-0.75) and over-cap backlog, and rejects the rest.
         """
         from onep.harness.scorer import (
-            BACKLOG_THRESHOLD, DEFAULT_UNSCORED_SCORE, classify,
+            DEFAULT_UNSCORED_SCORE,
+            classify,
         )
 
         backlog: list[ImprovementCandidate] = []
@@ -144,9 +194,7 @@ class PrioritizeStage:
             )
             candidate.fingerprint = self.scheduler.fingerprint(probe)
             if candidate.fingerprint in integrated_fingerprints:
-                candidate.status = (
-                    "regression" if use_scores else "duplicate"
-                )
+                candidate.status = "regression" if use_scores else "duplicate"
                 parked.append(candidate)
                 continue
             if candidate.fingerprint in seen:
@@ -169,10 +217,9 @@ class PrioritizeStage:
                 backlog.append(candidate)
             else:
                 parked.append(candidate)
-        backlog.sort(key=lambda candidate: candidate.score or 0.0,
-                     reverse=True)
-        overflow = backlog[self.cap:]
+        backlog.sort(key=lambda candidate: candidate.score or 0.0, reverse=True)
+        overflow = backlog[self.cap :]
         for candidate in overflow:
             candidate.status = "parked"
             parked.append(candidate)
-        return backlog[:self.cap], parked
+        return backlog[: self.cap], parked

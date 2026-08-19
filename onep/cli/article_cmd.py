@@ -1,4 +1,5 @@
 """onep article — synthesize a knowledge article for a completed project."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,7 +8,7 @@ import click
 from rich.console import Console
 
 from onep.harness.article import ArticleSynthesizer
-from onep.harness.persistence import load_harness_run
+from onep.harness.persistence import load_harness_run, run_directory
 from onep.harness.vault import VaultWriter, global_vault_root
 from onep.llm.adapters import LLMAdapter
 from onep.persistence.database import init_db, list_projects
@@ -34,13 +35,7 @@ def article_cmd(project: str) -> None:
             f"[yellow]No harness run found for '{project}' at {workspace}.[/yellow]"
         )
         return
-    if run.mode == "greenfield" and run.greenfield_run is not None:
-        run_dir = (
-            workspace / ".onep" / "greenfield"
-            / "runs" / run.greenfield_run.id
-        )
-    else:
-        run_dir = workspace / ".onep" / "optimize" / "runs" / run.id
+    run_dir = run_directory(run, workspace)
     writer = VaultWriter(global_vault_root())
     synthesizer = ArticleSynthesizer(LLMAdapter(), writer)
     console.print(f"[cyan]Synthesizing article for '{project}'...[/cyan]")

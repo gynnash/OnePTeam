@@ -19,7 +19,7 @@ def test_list_notes_project_vault(vault):
     assert len(notes) == 2  # Project.md MOC + the seeded experiment note
     note = next(n for n in notes if n["path"].startswith("Experiments/"))
     assert note["title"] == "experiment"
-    assert note["slug"] == "experiment"
+    assert note["slug"].startswith("0-experiment-experiment-")
     assert note["type"] == "experiment"
     assert note["iteration"] == 1
 

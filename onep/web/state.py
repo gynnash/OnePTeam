@@ -4,14 +4,14 @@ The web console is a pure consumer: every function here reads harness state
 (run.yaml, flow-events.jsonl, recorder JSONL files) and returns plain dicts
 for the API layer. Nothing here mutates state.
 """
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from typing import Any
 
-from onep.harness.models import HarnessRun
-from onep.harness.persistence import harness_run_path, load_harness_run
+from onep.harness.persistence import load_harness_run, run_directory
 from onep.harness.states import HarnessStage
 
 
@@ -27,9 +27,7 @@ def resolve_run_dir(workspace: Path) -> Path | None:
     run = load_harness_run(workspace)
     if run is None:
         return None
-    if run.mode == "greenfield" and run.greenfield_run is not None:
-        return Path(workspace) / ".onep" / "greenfield" / "runs" / run.greenfield_run.id
-    return Path(workspace) / ".onep" / "optimize" / "runs" / run.id
+    return run_directory(run, workspace)
 
 
 def last_flow_stage(workspace: Path) -> str:
@@ -71,12 +69,14 @@ def stage_history(workspace: Path) -> list[dict[str, Any]]:
             payload = raw.get("payload")
             if not isinstance(payload, dict):
                 continue
-            entries.append({
-                "type": str(raw.get("type") or "flow_transition"),
-                "stage": str(payload.get("stage") or ""),
-                "iteration": int(payload.get("iteration") or 0),
-                "payload": payload,
-            })
+            entries.append(
+                {
+                    "type": str(raw.get("type") or "flow_transition"),
+                    "stage": str(payload.get("stage") or ""),
+                    "iteration": int(payload.get("iteration") or 0),
+                    "payload": payload,
+                }
+            )
     return entries
 
 
@@ -89,7 +89,11 @@ def run_summary(workspace: Path) -> dict[str, Any] | None:
         "project_name": run.project_name,
         "mode": run.mode,
         "status": run.status,
-        "stage": last_flow_stage(workspace) or run.stage,
+        "stage": (
+            run.stage
+            if run.status in {"failed", "blocked", "cancelled"}
+            else (last_flow_stage(workspace) or run.stage)
+        ),
         "iteration": run.iteration,
         "spent": run.spent,
         "stop_reason": (run.stop_state or {}).get("reason", ""),
@@ -102,22 +106,25 @@ def run_summary(workspace: Path) -> dict[str, Any] | None:
 def project_summaries(projects=None) -> list[dict[str, Any]]:
     if projects is None:
         from onep.persistence.database import list_projects
+
         projects = list_projects()
     rows = []
     for project in projects:
         workspace = Path(project.workspace_path).resolve()
-        rows.append({
-            "id": project.id,
-            "name": project.name,
-            "mode": project.mode.value,
-            "status": project.status.value,
-            "current_stage": project.current_stage,
-            "workspace_path": str(workspace),
-            "requirement": project.requirement,
-            "created_at": project.created_at,
-            "updated_at": project.updated_at,
-            "harness": run_summary(workspace),
-        })
+        rows.append(
+            {
+                "id": project.id,
+                "name": project.name,
+                "mode": project.mode.value,
+                "status": project.status.value,
+                "current_stage": project.current_stage,
+                "workspace_path": str(workspace),
+                "requirement": project.requirement,
+                "created_at": project.created_at,
+                "updated_at": project.updated_at,
+                "harness": run_summary(workspace),
+            }
+        )
     return rows
 
 
@@ -131,7 +138,11 @@ def run_detail(workspace: Path) -> dict[str, Any] | None:
         "mode": run.mode,
         "original_goal": run.original_goal,
         "status": run.status,
-        "stage": last_flow_stage(workspace) or run.stage,
+        "stage": (
+            run.stage
+            if run.status in {"failed", "blocked", "cancelled"}
+            else (last_flow_stage(workspace) or run.stage)
+        ),
         "iteration": run.iteration,
         "spent": run.spent,
         "started_at": run.started_at,
@@ -150,7 +161,9 @@ def run_detail(workspace: Path) -> dict[str, Any] | None:
     }
 
 
-def log_entries(workspace: Path, offset: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+def log_entries(
+    workspace: Path, offset: int = 0, limit: int = 200
+) -> list[dict[str, Any]]:
     """Recorder events from the run's events.jsonl, sliced by line offset."""
     run_dir = resolve_run_dir(workspace)
     if run_dir is None:

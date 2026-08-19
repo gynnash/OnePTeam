@@ -53,6 +53,19 @@ def test_understand_produces_contract(tmp_path):
     assert run.slices[0].id == "core"
 
 
+def test_mixed_understand_uses_requirement_contract(tmp_path):
+    run = GreenfieldRun(
+        id="gf-mixed", project_name="demo", requirement="add auth",
+        workspace=str(tmp_path),
+    )
+    recorder = GreenfieldRecorder(tmp_path / "runs" / "gf-mixed", run, None)
+    contract = UnderstandStage(_Kernel(DiscoverLLM()), mode="mixed").run(
+        run, tmp_path, recorder, CostTracker(0.0)
+    )
+    assert contract.items[0].id == "REQ-1"
+    assert run.slices[0].id == "core"
+
+
 def test_brownfield_mode_raises():
     class _BrownfieldKernel:
         pass

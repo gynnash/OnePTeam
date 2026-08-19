@@ -1,5 +1,6 @@
 # onep/harness/reflect.py
 """REFLECT stage and STOP evaluation of the Product Loop."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -71,20 +72,26 @@ class ReflectStage:
         if llm is None:
             return snapshot
         findings = "\n".join(review_findings or []) or "(none)"
-        output = llm.invoke(
-            system_prompt=REFLECTOR_SYSTEM,
-            user_prompt=REFLECTOR_PROMPT.format(
-                iteration=iteration,
-                acceptance="\n".join(
-                    f"- {item.id} [{item.priority}] {item.behavior} "
-                    f"({item.status})" for item in contract.items
-                ) or "(none)",
-                findings=findings,
-                acceptance_rate=snapshot.acceptance_pass_rate,
-                test_rate=snapshot.test_pass_rate,
-            ),
-            stage_name="harness_reflector",
-        )
+        try:
+            output = llm.invoke(
+                system_prompt=REFLECTOR_SYSTEM,
+                user_prompt=REFLECTOR_PROMPT.format(
+                    iteration=iteration,
+                    acceptance="\n".join(
+                        f"- {item.id} [{item.priority}] {item.behavior} ({item.status})"
+                        for item in contract.items
+                    )
+                    or "(none)",
+                    findings=findings,
+                    acceptance_rate=snapshot.acceptance_pass_rate,
+                    test_rate=snapshot.test_pass_rate,
+                ),
+                stage_name="harness_reflector",
+            )
+        except Exception:
+            if track is not None and tracker is not None:
+                track(tracker, "harness_reflector")
+            return snapshot
         if track is not None and tracker is not None:
             track(tracker, "harness_reflector")
         data = _json_object(output or "")
@@ -98,25 +105,15 @@ class ReflectStage:
 
         llm_quality = _bounded("quality_score", deterministic_score)
         llm_coverage = _bounded("goal_coverage", snapshot.goal_coverage)
-        snapshot.goal_coverage = round(
-            min(snapshot.goal_coverage, llm_coverage), 4
-        )
-        snapshot.architecture_quality = _bounded(
-            "architecture_quality", 0.0
-        )
+        snapshot.goal_coverage = round(min(snapshot.goal_coverage, llm_coverage), 4)
+        snapshot.architecture_quality = _bounded("architecture_quality", 0.0)
         try:
-            snapshot.blocker_count = max(
-                0, int(data.get("blocker_count") or 0)
-            )
+            snapshot.blocker_count = max(0, int(data.get("blocker_count") or 0))
         except (TypeError, ValueError):
             snapshot.blocker_count = 0
         raw_risks = data.get("risks") or []
-        snapshot.risks = [
-            str(risk) for risk in raw_risks if isinstance(risk, str)
-        ][:10]
-        snapshot.quality_score = round(
-            0.7 * deterministic_score + 0.3 * llm_quality, 4
-        )
+        snapshot.risks = [str(risk) for risk in raw_risks if isinstance(risk, str)][:10]
+        snapshot.quality_score = round(0.7 * deterministic_score + 0.3 * llm_quality, 4)
         return snapshot
 
 
@@ -137,12 +134,30 @@ def evaluate_stop(
     evidence: dict[str, Any] = {
         "iteration": run.iteration,
         "quality_score": snapshot.quality_score,
+        "quality_curve": [
+            round(history.quality_score, 4) for history in run.quality_history[-3:]
+        ],
+        "score_distribution": {
+            candidate.id: candidate.score
+            for candidate in (scored or [])
+            if candidate.score is not None
+        },
     }
-    if run.quality_history:
-        evidence["quality_curve"] = [
-            round(history.quality_score, 4)
-            for history in run.quality_history[-3:]
-        ]
+    hard_gate_evidence = {
+        "hard_gates_passed": snapshot.hard_gates_passed,
+        "acceptance_pass_rate": snapshot.acceptance_pass_rate,
+        "test_pass_rate": snapshot.test_pass_rate,
+        "blocker_count": snapshot.blocker_count,
+    }
+    evidence.update(hard_gate_evidence)
+    if (
+        not snapshot.hard_gates_passed
+        or snapshot.acceptance_pass_rate < 1.0
+        or snapshot.test_pass_rate < 1.0
+        or snapshot.blocker_count > 0
+    ):
+        evidence["hard_gate_blocked"] = True
+        return StopDecision(False, None, evidence)
     if run.iteration >= run.options.max_rounds:
         return StopDecision(True, StopReason.MAX_ITERATION, evidence)
     if run.options.max_cost > 0 and run.spent >= run.options.max_cost:
@@ -153,21 +168,22 @@ def evaluate_stop(
                 (candidate.score or 0.0 for candidate in scored),
                 default=0.0,
             )
-            evidence.update({
-                "top_score": top_score,
-                "scored_count": len(scored),
-                "score_distribution": {
-                    candidate.id: candidate.score for candidate in scored
-                },
-            })
-            return StopDecision(
-                True, StopReason.NO_HIGH_VALUE_WORK, evidence
+            evidence.update(
+                {
+                    "top_score": top_score,
+                    "scored_count": len(scored),
+                    "score_distribution": {
+                        candidate.id: candidate.score for candidate in scored
+                    },
+                }
             )
+            if top_score < 0.75:
+                return StopDecision(True, StopReason.NO_HIGH_VALUE_WORK, evidence)
+            evidence["planning_blocked"] = True
+            return StopDecision(False, None, evidence)
         return StopDecision(True, StopReason.GOALS_SATISFIED, evidence)
     deltas = _consecutive_deltas(run.quality_history, diminishing_rounds)
-    if deltas is not None and all(
-        delta < diminishing_delta for delta in deltas
-    ):
+    if deltas is not None and all(delta < diminishing_delta for delta in deltas):
         evidence["deltas"] = deltas
         return StopDecision(True, StopReason.DIMINISHING_RETURNS, evidence)
     return StopDecision(False, None, evidence)
@@ -178,12 +194,10 @@ def _consecutive_deltas(
 ) -> list[float] | None:
     """Absolute quality deltas between the last rounds+1 snapshots, or None
     when the history is too short."""
-    tail = history[-(rounds + 1):]
+    tail = history[-(rounds + 1) :]
     if len(tail) < rounds + 1:
         return None
     return [
-        round(
-            abs(tail[index + 1].quality_score - tail[index].quality_score), 4
-        )
+        round(abs(tail[index + 1].quality_score - tail[index].quality_score), 4)
         for index in range(len(tail) - 1)
     ]

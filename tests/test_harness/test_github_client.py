@@ -133,7 +133,10 @@ def test_fetch_readme_truncates():
 
 
 def test_fetch_top_tree_returns_paths():
+    requests = []
+
     def urlopen(request):
+        requests.append(request)
         return FakeResponse({
             "tree": [
                 {"path": "src", "type": "tree"},
@@ -143,3 +146,6 @@ def test_fetch_top_tree_returns_paths():
 
     paths = _client(urlopen).fetch_top_tree("a/b", max_entries=10)
     assert paths == ["src", "pyproject.toml"]
+    assert requests[0].full_url.endswith(
+        "/repos/a/b/git/trees/HEAD?recursive=1"
+    )

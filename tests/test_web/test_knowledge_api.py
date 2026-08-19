@@ -16,7 +16,7 @@ def test_notes_list_project(tmp_path, monkeypatch):
     response = client.get("/api/knowledge/notes?vault=project&project=demo")
     assert response.status_code == 200
     notes = response.json()["notes"]
-    assert any(note["slug"] == "experiment" for note in notes)
+    assert any(note["path"].startswith("Experiments/") for note in notes)
 
 
 def test_notes_list_requires_project_for_project_vault(tmp_path, monkeypatch):
@@ -35,7 +35,7 @@ def test_notes_list_global_without_project(tmp_path, monkeypatch):
 def test_note_content(tmp_path, monkeypatch):
     client = _vaulted_client(tmp_path, monkeypatch)
     notes = client.get("/api/knowledge/notes?vault=project&project=demo").json()["notes"]
-    event_note = next(n for n in notes if n["slug"] == "experiment")
+    event_note = next(n for n in notes if n["path"].startswith("Experiments/"))
     response = client.get(
         f"/api/knowledge/notes/content?vault=project&project=demo&path={event_note['path']}")
     assert response.status_code == 200
