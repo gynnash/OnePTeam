@@ -12,7 +12,6 @@ from onep.domain import Problem
 from onep.web import runtime
 from onep.web.api.events import router as events_router
 from onep.web.api.knowledge import router as knowledge_router
-from onep.web.api.projects import router as projects_router
 from onep.web.api_v1 import router as v1_router
 
 UI_DIST = Path(__file__).resolve().parent / "ui" / "dist"
@@ -23,7 +22,7 @@ FALLBACK_INDEX = """<!DOCTYPE html>
 <h1>OnePTeam Web Console</h1>
 <p>The web UI build was not found. The API is available:</p>
 <ul>
-  <li><a href="/api/projects">GET /api/projects</a> — project list and run status</li>
+  <li><a href="/api/v1/projects">GET /api/v1/projects</a> — project list and run status</li>
   <li><a href="/api/knowledge/notes?vault=global">GET /api/knowledge/notes</a> — knowledge notes</li>
 </ul>
 <p>Build the frontend with <code>cd onep/web/ui &amp;&amp; npm install &amp;&amp; npm run build</code>.</p>
@@ -36,7 +35,6 @@ def create_app(application=None) -> FastAPI:
     # read-only UI and legacy API usable in constrained environments.
     app.state.application = application
     app.include_router(v1_router)
-    app.include_router(projects_router)
     app.include_router(knowledge_router)
     app.include_router(events_router)
 

@@ -44,6 +44,7 @@ from onep.greenfield.verification import (
     is_pytest_command,
     is_test_command,
 )
+from onep.harness.acceptance import evaluate_acceptance
 from onep.llm.adapters import LLMAdapter
 from onep.llm.cost import CostTracker
 from onep.llm.router import resolve_model
@@ -56,6 +57,7 @@ from onep.strategy.optimize_engine import EngineAttemptResult, OptimizeEngine
 from onep.strategy.repair import (
     AttemptStagnationDetector,
     RepairBrief,
+    classify_exception,
     classify_failure,
     previous_tool_actions,
 )
@@ -413,6 +415,20 @@ class GreenfieldEngine:
                     session.rollback_attempt()
                     raise
                 except Exception as exc:
+                    decision = classify_exception(exc)
+                    if decision.retry_lane != "transport":
+                        interrupted_changes = session.changed_files()
+                        if interrupted_changes:
+                            recorder.save_wip(
+                                plan, interrupted_changes, session.workspace
+                            )
+                        recorder.failure(
+                            "TOOL_FAIL",
+                            f"{decision.category}:{type(exc).__name__}",
+                            decision.diagnostic,
+                            context=f"切片={plan.id}; 已保存WIP={len(interrupted_changes)}个文件",
+                        )
+                        raise
                     transport_retries += 1
                     interrupted_changes = session.changed_files()
                     if interrupted_changes:
@@ -987,10 +1003,6 @@ class GreenfieldEngine:
         if result is not None:
             self._mark_final_acceptance(contract, result)
             recorder.save_contract(contract)
-        if not contract.required_complete:
-            raise RuntimeError(
-                "P0/P1 acceptance items lack passing executable evidence"
-            )
         run.stage = GreenfieldStage.ARCHITECTURE_REVIEW
         review = None
         if reuse_assessment:
@@ -1118,6 +1130,17 @@ class GreenfieldEngine:
                     distill=distill,
                 )
             raise RuntimeError(f"Deployment verification failed: {failed.command}")
+        decision = evaluate_acceptance(
+            contract,
+            hard_gates_passed=True,
+            blocker_count=0,
+            fingerprint=fingerprint,
+        )
+        if not decision.satisfied:
+            missing = ", ".join(decision.missing) or "unknown acceptance evidence"
+            raise RuntimeError(
+                "P0/P1 acceptance items lack passing executable evidence: " + missing
+            )
 
     @staticmethod
     def _final_test_repair_plan(
@@ -1242,10 +1265,20 @@ class GreenfieldEngine:
             session, commands, contract
         )
         self._verified_assessment_fingerprint = accepted_fingerprint
-        self._save_assessment(
-            run, recorder, accepted_fingerprint, [], True
+        decision = evaluate_acceptance(
+            contract,
+            hard_gates_passed=True,
+            blocker_count=0,
+            fingerprint=accepted_fingerprint,
         )
-        return True
+        self._save_assessment(
+            run,
+            recorder,
+            accepted_fingerprint,
+            list(decision.missing),
+            decision.satisfied,
+        )
+        return decision.satisfied
 
     @staticmethod
     def _save_assessment(

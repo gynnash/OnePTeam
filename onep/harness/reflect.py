@@ -55,7 +55,7 @@ class ReflectStage:
     ) -> QualitySnapshot:
         required = [
             item for item in contract.items if item.priority in {"P0", "P1"}
-        ] or list(contract.items)
+        ]
         passed = sum(1 for item in required if item.status == "passed")
         acceptance_rate = passed / len(required) if required else 0.0
         test_rate = 1.0 if hard_gates_passed else 0.0
@@ -150,12 +150,16 @@ def evaluate_stop(
         "blocker_count": snapshot.blocker_count,
     }
     evidence.update(hard_gate_evidence)
-    if (
-        not snapshot.hard_gates_passed
-        or snapshot.acceptance_pass_rate < 1.0
-        or snapshot.test_pass_rate < 1.0
-        or snapshot.blocker_count > 0
-    ):
+    # The product loop normally receives its hard completion result from the
+    # execution kernel. Keep the reducer inputs explicit here so an LLM quality
+    # score can never turn a failed hard gate into a stop decision.
+    hard_complete = (
+        snapshot.hard_gates_passed
+        and snapshot.acceptance_pass_rate == 1.0
+        and snapshot.test_pass_rate == 1.0
+        and snapshot.blocker_count == 0
+    )
+    if not hard_complete:
         evidence["hard_gate_blocked"] = True
         return StopDecision(False, None, evidence)
     if run.iteration >= run.options.max_rounds:

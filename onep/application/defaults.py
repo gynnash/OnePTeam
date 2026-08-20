@@ -207,14 +207,6 @@ def _run_handler(store: ControlStore, *, resume: bool = False):
     def run(payload, context: RequestContext) -> dict[str, Any]:
         project = resolve_project(str(payload.get("project") or context.project_id))
         existing = store.latest_run_for_project(project.id)
-        if resume and existing is None:
-            raise Problem(
-                "legacy_project_read_only",
-                "Historical project is read-only",
-                "Only runs created by V2 can be resumed from the Web workbench.",
-                actionable=True,
-                suggested_actions=("create_new_project",),
-            )
         run_id = context.run_id or (
             existing.id if resume and existing is not None else uuid4().hex
         )
@@ -236,7 +228,8 @@ def _run_handler(store: ControlStore, *, resume: bool = False):
         from onep.orchestrator.runner import run_pipeline
 
         try:
-            completed = run_pipeline(project.name)
+            run_options = GreenfieldOptions.from_dict(payload.get("options"))
+            completed = run_pipeline(project.name, options=run_options)
         except Exception as exc:
             store.update_run(run_id, status=RunStatus.FAILED, stage="failed")
             store.append_event(

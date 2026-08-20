@@ -13,6 +13,9 @@ from onep.strategy.optimize_models import PlanCandidate
 from onep.strategy.plan_scheduler import PlanScheduler
 
 
+HARNESS_SCHEMA_VERSION = 2
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -269,6 +272,7 @@ class HarnessRun:
     workspace: str
     mode: str  # greenfield | brownfield | mixed
     original_goal: str
+    schema_version: int = HARNESS_SCHEMA_VERSION
     stage: str = "init"
     status: str = "pending"
     options: HarnessOptions = field(default_factory=HarnessOptions)
@@ -291,6 +295,22 @@ class HarnessRun:
     spent: float = 0.0
     started_at: str = field(default_factory=_now)
     ended_at: str = ""
+
+    def sync_engineering_state(
+        self,
+        *,
+        spent: float | None = None,
+        work_items: list[WorkItem] | None = None,
+    ) -> None:
+        """Copy kernel-owned slice progress into the product-level read model."""
+        if self.greenfield_run is not None:
+            self.work_items = work_items or [
+                SliceAdapter.to_work_item(plan) for plan in self.greenfield_run.slices
+            ]
+            if spent is not None:
+                self.greenfield_run.spent = spent
+        if spent is not None:
+            self.spent = spent
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -325,6 +345,7 @@ class HarnessRun:
             workspace=str(data["workspace"]),
             mode=str(data.get("mode") or "greenfield"),
             original_goal=str(data.get("original_goal") or ""),
+            schema_version=HARNESS_SCHEMA_VERSION,
             stage=str(data.get("stage") or "init"),
             status=str(data.get("status") or "pending"),
             options=HarnessOptions.from_dict(data.get("options")),

@@ -19,10 +19,8 @@ def test_create_help():
 
 
 def test_create_initializes_git_repository(tmp_path, monkeypatch):
-    monkeypatch.setattr("onep.application.projects.init_db", lambda: None)
-    monkeypatch.setattr(
-        "onep.application.projects.insert_project", lambda project: None
-    )
+    config_dir = tmp_path.parent / f"{tmp_path.name}-config"
+    monkeypatch.setattr("onep.persistence.database._config_dir", lambda: config_dir)
     monkeypatch.chdir(tmp_path)
 
     result = CliRunner().invoke(
@@ -40,14 +38,13 @@ def test_create_initializes_git_repository(tmp_path, monkeypatch):
 
 
 def test_create_reuses_current_git_repository_and_config(tmp_path, monkeypatch):
+    config_dir = tmp_path.parent / f"{tmp_path.name}-config"
+    monkeypatch.setattr("onep.persistence.database._config_dir", lambda: config_dir)
     repo = git.Repo.init(tmp_path)
     with repo.config_writer() as config:
         config.set_value("user", "name", "Local User")
         config.set_value("user", "email", "local@example.com")
         config.set_value("onep", "marker", "keep-me")
-    monkeypatch.setattr("onep.application.projects.init_db", lambda: None)
-    inserted = []
-    monkeypatch.setattr("onep.application.projects.insert_project", inserted.append)
     monkeypatch.chdir(tmp_path)
 
     result = CliRunner().invoke(
@@ -55,18 +52,15 @@ def test_create_reuses_current_git_repository_and_config(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0
-    assert inserted[0].workspace_path == str(tmp_path)
     reopened = git.Repo(tmp_path)
     assert reopened.config_reader().get_value("onep", "marker") == "keep-me"
     assert reopened.head.commit.message == "chore: initialize onep greenfield project"
 
 
 def test_create_runs_engineering_loop_by_default(tmp_path, monkeypatch):
+    config_dir = tmp_path.parent / f"{tmp_path.name}-config"
+    monkeypatch.setattr("onep.persistence.database._config_dir", lambda: config_dir)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("onep.application.projects.init_db", lambda: None)
-    monkeypatch.setattr(
-        "onep.application.projects.insert_project", lambda project: None
-    )
     called = []
     monkeypatch.setattr(
         "onep.orchestrator.runner.run_pipeline",

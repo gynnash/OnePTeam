@@ -1,6 +1,7 @@
 from onep.strategy.repair import (
     AttemptStagnationDetector,
     RepairBrief,
+    classify_exception,
     classify_failure,
     extract_relevant_files,
     has_mutating_action,
@@ -105,3 +106,15 @@ def test_runtime_only_diff_does_not_change_stagnation_signature():
     )
 
     assert brief(diff=code).diff_sha == brief(diff=runtime).diff_sha
+
+
+def test_exception_classification_separates_transport_from_tool_failures():
+    transport = classify_exception(ConnectionError("incomplete chunked read"))
+    tool = classify_exception(RuntimeError("old_string not found"))
+
+    assert transport.retry_lane == "transport"
+    assert transport.retryable is True
+    assert transport.consume_repair is False
+    assert tool.category == "tool_failed"
+    assert tool.retry_lane == "tool"
+    assert tool.retryable is False

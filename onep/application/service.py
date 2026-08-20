@@ -40,6 +40,7 @@ class ApplicationService:
         *,
         context: RequestContext | None = None,
         action_id: str | None = None,
+        wait: bool = False,
     ) -> ActionResult:
         capability = self.registry.get(capability_id)
         request = (context or RequestContext()).with_trace()
@@ -54,7 +55,7 @@ class ApplicationService:
             project_id=request.project_id,
             run_id=request.run_id,
         )
-        if capability.background:
+        if capability.background and not wait:
             job = self.store.enqueue_job(
                 capability.id,
                 body,

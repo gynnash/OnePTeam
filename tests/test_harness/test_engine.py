@@ -193,7 +193,7 @@ def test_harness_mixed_mode_builds_requirement_gap(tmp_path, monkeypatch):
     assert (tmp_path / "app.py").read_text() == "VALUE = 1\n"
 
 
-def test_harness_iterates_when_brainstorm_finds_work(tmp_path, monkeypatch):
+def test_harness_stops_without_expanding_satisfied_requirement(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
@@ -213,16 +213,15 @@ def test_harness_iterates_when_brainstorm_finds_work(tmp_path, monkeypatch):
 
     assert success is True
     run = load_harness_run(tmp_path)
-    assert run.iteration == 2
+    assert run.iteration == 1
     assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
-    assert len(run.quality_history) == 2
-    integrated = [c for c in run.improvement_candidates if c.status == "integrated"]
-    assert [c.id for c in integrated] == ["I-001"]
-    assert any(w.id == "iter1-1" and w.status == "completed" for w in run.work_items)
+    assert len(run.quality_history) == 1
+    assert llm.brainstorm_calls == 0
+    assert run.improvement_candidates == []
     assert repo.active_branch.name.startswith("onep/greenfield-")
 
 
-def test_harness_stops_on_max_iteration(tmp_path, monkeypatch):
+def test_satisfied_requirement_takes_precedence_over_max_iteration(tmp_path, monkeypatch):
     _repo(tmp_path)
     monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
@@ -242,7 +241,7 @@ def test_harness_stops_on_max_iteration(tmp_path, monkeypatch):
 
     assert success is True
     run = load_harness_run(tmp_path)
-    assert run.stop_state["reason"] == StopReason.MAX_ITERATION.value
+    assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
     assert run.iteration == 1
 
 
@@ -946,10 +945,8 @@ def test_harness_brownfield_parks_candidate_when_plan_generation_fails(
     assert not any(w.id == "iter1-1" for w in run.work_items)
 
 
-def test_harness_in_loop_design_docs_are_committed(tmp_path, monkeypatch):
-    """Evidence-bearing round >= 2 must not leave the tree dirty:
-    pause/resume requires a clean session (GreenfieldGitSession raises
-    ValueError on dirty tracked files)."""
+def test_satisfied_harness_commits_design_docs_without_extra_round(tmp_path, monkeypatch):
+    """Initial evidence-bearing design docs are committed before completion."""
     from onep.greenfield.engine import DISCOVERY_PROMPT  # noqa: F401 (context)
 
     stop_flag = tmp_path / ".onep" / "harness" / "stop_requested"
@@ -1013,9 +1010,9 @@ def test_harness_in_loop_design_docs_are_committed(tmp_path, monkeypatch):
     )
     assert success is True
     run = load_harness_run(tmp_path)
-    assert run.iteration == 2
-    assert run.stop_state["reason"] == StopReason.USER_STOP.value
-    # Pause/resume parity: the working tree must be clean after the run.
+    assert run.iteration == 1
+    assert run.stop_state["reason"] == StopReason.GOALS_SATISFIED.value
+    assert llm.brainstorm_calls == 0
     assert not repo.is_dirty(untracked_files=True)
 
 
@@ -1359,9 +1356,8 @@ class ApprovedCandidateLLM(FakeLLM):
         return super().invoke(system_prompt, user_prompt, stage_name)
 
 
-def test_harness_applies_human_approval_to_backlog(tmp_path, monkeypatch):
-    """A pre-seeded approve decision pushes the parked candidate into the
-    backlog, gets it built, and gates the GOALS_SATISFIED stop."""
+def test_completed_build_leaves_future_candidate_decision_pending(tmp_path, monkeypatch):
+    """The build command does not expand a satisfied requirement into discovery."""
     _repo(tmp_path)
     monkeypatch.setattr("onep.harness.engine.update_project", lambda p: None)
     monkeypatch.setattr("onep.greenfield.engine.update_project", lambda p: None)
@@ -1381,8 +1377,7 @@ def test_harness_applies_human_approval_to_backlog(tmp_path, monkeypatch):
         is True
     )
     run = load_harness_run(tmp_path)
-    assert run.iteration == 2
+    assert run.iteration == 1
     assert run.stop_state["reason"] == "goals_satisfied"
-    approved = next(c for c in run.improvement_candidates if c.id == "I-001")
-    assert approved.status == "integrated"
-    assert load_candidate_decisions(tmp_path)[0]["applied"] is True
+    assert run.improvement_candidates == []
+    assert load_candidate_decisions(tmp_path)[0]["applied"] is False

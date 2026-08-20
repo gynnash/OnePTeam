@@ -25,6 +25,26 @@ _SUGGESTIONS = {
 
 
 @dataclass(frozen=True)
+class FailureDecision:
+    category: str
+    retry_lane: str
+    retryable: bool
+    consume_repair: bool
+    diagnostic: str
+
+
+def classify_exception(error: Exception) -> FailureDecision:
+    """Classify orchestration exceptions without treating every error as transport."""
+    diagnostic = str(error) or type(error).__name__
+    category = classify_failure(diagnostic)
+    if category in {"transport_interrupted", "rate_limited", "service_unavailable"}:
+        return FailureDecision(category, "transport", True, False, diagnostic)
+    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+        return FailureDecision("cancelled", "terminal", False, False, diagnostic)
+    return FailureDecision("tool_failed", "tool", False, False, diagnostic)
+
+
+@dataclass(frozen=True)
 class RepairBrief:
     failure_type: str
     failure_category: str
@@ -200,6 +220,14 @@ def classify_failure(raw: str) -> str:
     lowered = raw.lower()
     rules = (
         (
+            "rate_limited",
+            ("rate limit", "rate_limit", "ratelimit", "too many requests", "429"),
+        ),
+        (
+            "service_unavailable",
+            ("service unavailable", "overloaded", "server error", "503"),
+        ),
+        (
             "collection_conflict",
             ("import file mismatch", "module/package name collision"),
         ),
@@ -226,6 +254,10 @@ def classify_failure(raw: str) -> str:
                 "apiconnectionerror",
                 "incomplete chunked read",
                 "peer closed connection",
+                "connection reset",
+                "connection error",
+                "timed out",
+                "timeout",
             ),
         ),
         ("assertion_failed", ("assertionerror", "assert ", "indexerror", "keyerror")),

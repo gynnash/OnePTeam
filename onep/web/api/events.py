@@ -7,14 +7,14 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from onep.web import runtime
-from onep.web.api.projects import _project_by_name
+from onep.web.api.common import project_by_name
 
 router = APIRouter(prefix="/api/projects", tags=["events"])
 
 
 @router.get("/{name}/events")
 def events_stream(name: str, poll: float | None = None):
-    project = _project_by_name(name)
+    project = project_by_name(name)
     return StreamingResponse(
         runtime.event_stream(
             Path(project.workspace_path),

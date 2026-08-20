@@ -10,7 +10,8 @@ import uuid
 from rich.console import Console
 
 from onep.config import load_config
-from onep.greenfield.engine import GreenfieldBlocked, GreenfieldEngine
+from onep.execution.kernel import ExecutionKernel
+from onep.greenfield.engine import GreenfieldBlocked
 from onep.greenfield.gates import GreenfieldGateRunner
 from onep.greenfield.git_session import GreenfieldGitSession
 from onep.greenfield.models import (
@@ -88,7 +89,7 @@ class HarnessEngine:
             if vault_root is not None
             else global_vault_root()
         )
-        self.kernel = GreenfieldEngine(self.console, self.llm)
+        self.kernel = ExecutionKernel(self.console, self.llm)
         self.research = ResearchStage(self.llm, track=self.kernel._track)
         self.design = DesignStage(self.llm, track=self.kernel._track)
         self.scorer = OpportunityScorer(self.llm, track=self.kernel._track)
@@ -387,8 +388,10 @@ class HarnessEngine:
                     respect_satisfied_early_exit=(run.iteration == 1),
                     distill=distill_checkpoint,
                 )
-                run.spent = tracker.spent
-                run.work_items = self._greenfield_work_items(gf_run, contract)
+                run.sync_engineering_state(
+                    spent=tracker.spent,
+                    work_items=self._greenfield_work_items(gf_run, contract),
+                )
                 self._sync_candidate_statuses(run)
 
                 flow.transition(
@@ -433,78 +436,16 @@ class HarnessEngine:
                     }
                     break
 
-                flow.transition(HarnessStage.DISCOVER)
-                candidates = self._discover(run, contract, snapshot, tracker)
-                flow.transition(HarnessStage.PRIORITIZE)
-                backlog, decision = self._prioritize(
-                    run,
-                    contract,
-                    snapshot,
-                    candidates,
-                    tracker,
-                    workspace,
-                    require_build_scope=True,
-                )
-                save_harness_run(run)
-                if decision.stop:
-                    run.stop_state = {
-                        "reason": decision.reason.value,
-                        "evidence": decision.evidence,
-                    }
-                    break
-                for index, candidate in enumerate(backlog):
-                    candidate.status = "selected"
-                    plan = self._candidate_slice(
-                        candidate, contract, run.iteration, index
-                    )
-                    gf_run.slices.append(plan)
-                    recorder.save_slice(plan)
-                recorder.save_contract(contract)
-                run.product_spec["acceptance_contract"] = contract.to_dict()
-                self.kernel._sanitize_generated_commands(gf_run, contract, recorder)
-                self.kernel._normalize_slice_plans(gf_run, contract, recorder)
-                research = self.research.run(
-                    goal=run.original_goal,
-                    acceptance_summary=self._acceptance_summary(contract),
-                    architecture_summary=self._architecture_summary(run_dir),
-                    iteration=run.iteration,
-                    run_dir=run_dir,
-                    tracker=tracker,
-                    mode=self._research_mode(backlog),
-                )
-                run.research_reports.append(research.to_dict())
-                self._record_research_skip(recorder, research)
-                flow.transition(
-                    HarnessStage.RESEARCH,
-                    {
-                        "mode": research.mode,
-                        "skip_reason": research.skip_reason,
-                    },
-                )
-                if research.has_evidence:
-                    architecture, warnings = self.design.run(
-                        research,
-                        self._acceptance_summary(contract),
-                        self.kernel._load_architecture(run_dir),
-                        run.iteration,
-                        tracker,
-                    )
-                    for warning in warnings:
-                        recorder.trace("DESIGN", f"无效引用已剔除: {warning}", "yellow")
-                    recorder.architecture_decision(architecture)
-                    run.architecture = dict(architecture)
-                    self.kernel._write_design_docs(
-                        workspace, gf_run, contract, architecture
-                    )
-                    # In-loop design docs carry evidence from this round;
-                    # commit them like the first-run and resume paths so a
-                    # pause/resume never meets a dirty tracked tree.
-                    # In-loop design docs carry evidence from this round;
-                    # commit them like the first-run and resume paths so a
-                    # pause/resume never meets a dirty tracked tree.
-                    self.kernel._commit_design_docs(session)
-                flow.transition(HarnessStage.DESIGN, {"incremental": True})
-                save_harness_run(run)
+                # The original requirement is the default stopping boundary.
+                # Product discovery is available as a separate workflow; it
+                # must not silently expand a completed one-sentence request.
+                run.stop_state = {
+                    "reason": StopReason.GOALS_SATISFIED.value,
+                    "evidence": self._stop_evidence(
+                        run, note="acceptance contract and hard gates passed"
+                    ),
+                }
+                break
 
             if run.stop_state.get("reason") == StopReason.USER_STOP.value and not (
                 contract is not None and contract.required_complete
@@ -521,7 +462,7 @@ class HarnessEngine:
                 )
                 run.status = "stopped"
                 run.ended_at = datetime.now(timezone.utc).isoformat()
-                run.spent = tracker.spent
+                run.sync_engineering_state(spent=tracker.spent)
                 recorder.save_run()
                 save_harness_run(run)
                 project.status = ProjectStatus.PAUSED
@@ -560,11 +501,10 @@ class HarnessEngine:
             gf_run.stage = GreenfieldStage.FINISHED
             gf_run.status = GreenfieldStatus.COMPLETED
             gf_run.ended_at = datetime.now(timezone.utc).isoformat()
-            gf_run.spent = tracker.spent
             run.status = "completed"
             run.stage = "stop"
             run.ended_at = datetime.now(timezone.utc).isoformat()
-            run.spent = tracker.spent
+            run.sync_engineering_state(spent=tracker.spent)
             self._distill_at_completion(run, tracker)
             recorder.trace("FINISHED", "Harness 闭环完成", "green")
             recorder.save_report(self.kernel._report(gf_run, contract))

@@ -8,7 +8,7 @@ import tempfile
 
 import yaml
 
-from onep.harness.models import HarnessRun
+from onep.harness.models import HARNESS_SCHEMA_VERSION, HarnessRun
 
 
 class HarnessStateCorrupt(RuntimeError):
@@ -58,6 +58,12 @@ def load_harness_run(workspace: Path) -> HarnessRun | None:
         raw = yaml.safe_load(path.read_text()) or {}
     except (OSError, yaml.YAMLError) as exc:
         raise HarnessStateCorrupt(f"cannot read harness state {path}: {exc}") from exc
+    version = int(raw.get("schema_version") or 1)
+    if version > HARNESS_SCHEMA_VERSION:
+        raise HarnessStateCorrupt(
+            f"harness state schema {version} is newer than supported "
+            f"schema {HARNESS_SCHEMA_VERSION}"
+        )
     try:
         return HarnessRun.from_dict(raw)
     except (AttributeError, KeyError, TypeError, ValueError) as exc:

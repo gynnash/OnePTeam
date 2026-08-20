@@ -143,11 +143,12 @@ class AcceptanceContract:
 
     @property
     def required_complete(self) -> bool:
-        required = [item for item in self.items if item.priority in {"P0", "P1"}]
-        return bool(required) and all(
-            item.status == "passed" and (item.commands or item.evidence)
-            for item in required
-        )
+        # Compatibility convenience for persisted runs. Runtime completion is
+        # decided by harness.acceptance.evaluate_acceptance, which also checks
+        # gates, review blockers, and the current tree fingerprint.
+        from onep.harness.acceptance import evaluate_acceptance
+
+        return evaluate_acceptance(self, hard_gates_passed=True).satisfied
 
 
 @dataclass
@@ -184,6 +185,7 @@ class SlicePlan:
 
 @dataclass
 class GreenfieldRun:
+    """Kernel-owned engineering checkpoint kept compatible with historical runs."""
     id: str
     project_name: str
     requirement: str

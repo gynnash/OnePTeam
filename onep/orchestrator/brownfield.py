@@ -1,16 +1,8 @@
-"""Brownfield pipeline: Scan → Analyze → Dialogue."""
-from __future__ import annotations
+"""Prompt templates retained for the strategy analysis commands.
 
-from crewai import Task
-
-from onep.agents.registry import get_agent
-from onep.persistence.models import Project, PipelineState
-
-
-BROWNFIELD_STAGES = [
-    {"name": "scan", "agent": "analyzer", "description": "策略文件扫描"},
-    {"name": "analyze", "agent": "strategy_architect", "description": "深度策略分析"},
-]
+The former Brownfield orchestrator was removed; active development runs use
+``HarnessEngine``. These constants stay here temporarily for import stability.
+"""
 
 SCAN_PROMPT = """请分析以下文件，判定每个文件是否包含业务策略或算法策略逻辑。
 
@@ -68,7 +60,6 @@ ANALYZE_PROMPT = """请对以下策略密集文件进行深度分析，发现可
 
 只输出 JSON，每行一个对象，不要其他内容。"""
 
-
 SCAN_PROMPT_FULL = """请分析以下文件内容，判定是否包含业务策略或算法策略逻辑。
 
 策略逻辑包括：
@@ -93,7 +84,6 @@ SCAN_PROMPT_FULL = """请分析以下文件内容，判定是否包含业务策�
 
 只输出 JSON，每行一个文件，不要其他内容。"""
 
-
 RECHECK_PROMPT = """判定以下文件是否有值得优化的策略逻辑。
 
 文件: {file_path}
@@ -109,20 +99,3 @@ drop 的情况：
 - 虽然有策略关键词但实现已合理
 - 纯样板代码被误标为策略
 - 决策逻辑简单清晰无优化空间"""
-
-
-def build_brownfield_tasks(project: Project, state: PipelineState) -> list[Task]:
-    """Build CrewAI Task list for the Brownfield pipeline."""
-    tasks = []
-    for stage in BROWNFIELD_STAGES:
-        task = Task(
-            description=f"Execute {stage['name']} for project {project.name}",
-            expected_output=f"Stage {stage['name']} completed.",
-            agent=get_agent(
-                stage["agent"],
-                workspace=str(project.workspace_path),
-                source_id=f"brownfield:{project.name}",
-            ),
-        )
-        tasks.append(task)
-    return tasks

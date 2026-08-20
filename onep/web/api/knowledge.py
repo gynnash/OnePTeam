@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query
 
 from onep.web import knowledge as knowledge_views
-from onep.web.api.projects import _project_by_name
+from onep.web.api.common import project_by_name
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
@@ -16,7 +16,7 @@ def _workspace(project: str) -> Path:
     workspace, so global-vault requests may omit `project`."""
     if not project:
         raise HTTPException(status_code=400, detail="project is required")
-    return Path(_project_by_name(project).workspace_path)
+    return Path(project_by_name(project).workspace_path)
 
 
 def _workspace_for_vault(project: str, vault: str) -> Path:

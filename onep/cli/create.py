@@ -5,8 +5,10 @@ import click
 from rich.console import Console
 from rich.panel import Panel
 
+from onep.application import RequestContext
+from onep.application.defaults import build_application
 from onep.application.projects import (
-    create_project,
+    create_project as create_project,
     default_project_name as default_project_name,
 )
 from onep.domain import Problem
@@ -39,22 +41,37 @@ def create_cmd(requirement, name, no_run, max_rounds, max_repairs_per_slice,
         verbose=verbose,
     )
     try:
-        project = create_project(requirement, name=name, options=options)
+        application = build_application()
+        created = application.execute(
+            "project.create",
+            {
+                "requirement": requirement,
+                "name": name or "",
+                "options": options.to_dict(),
+            },
+            context=RequestContext(actor="cli"),
+        )
+        project = created.data["project"]
     except Problem as exc:
         raise click.ClickException(str(exc)) from exc
     console.print(Panel.fit(
-        f"[bold green]Project '{project.name}' created![/bold green]\n"
-        f"Workspace: {project.workspace_path}\n"
+        f"[bold green]Project '{project['name']}' created![/bold green]\n"
+        f"Workspace: {project['workspace_path']}\n"
         f"Mode: Greenfield autonomous loop\n\n"
-        + (f"Run [bold cyan]onep run {project.name}[/bold cyan] to start."
+        + (f"Run [bold cyan]onep run {project['name']}[/bold cyan] to start."
            if no_run else "Starting autonomous engineering loop..."),
         title="OnePTeam",
     ))
     if not no_run:
-        from onep.orchestrator.runner import run_pipeline
-        if not run_pipeline(project.name, options=options):
+        result = application.execute(
+            "run.start",
+            {"project": project["id"], "options": options.to_dict()},
+            context=RequestContext(actor="cli", project_id=project["id"]),
+            wait=True,
+        )
+        if not result.data.get("completed"):
             raise click.ClickException(
-                f"Run did not complete. Resume with: onep run {project.name}"
+                f"Run did not complete. Resume with: onep run {project['name']}"
             )
 
 @click.command()
@@ -62,8 +79,18 @@ def create_cmd(requirement, name, no_run, max_rounds, max_repairs_per_slice,
 @click.option("--stage", "-s", default=None, help="Legacy checkpoint hint")
 def run_cmd(project_name: str, stage: str | None):
     """Run or resume the autonomous engineering loop."""
-    from onep.orchestrator.runner import run_pipeline
-    success = run_pipeline(project_name, start_from=stage)
+    if stage:
+        console.print(
+            f"[yellow]--stage {stage} is a legacy hint; resuming from the durable checkpoint.[/yellow]"
+        )
+    application = build_application()
+    result = application.execute(
+        "run.resume",
+        {"project": project_name},
+        context=RequestContext(actor="cli", project_id=project_name),
+        wait=True,
+    )
+    success = bool(result.data.get("completed"))
     if success:
         console.print("[bold green]Pipeline completed![/bold green]")
     else:

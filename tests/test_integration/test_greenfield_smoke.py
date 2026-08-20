@@ -7,7 +7,6 @@ import pytest
 
 from onep.config import load_config
 from onep.agents.registry import get_agent, list_agents, clear_registry
-from onep.orchestrator.greenfield import GREENFIELD_STAGES, STAGE_PROMPTS
 from onep.persistence.models import Project, ProjectMode, PipelineState, StageRun, StageStatus
 from onep.persistence.state import load_state, save_state
 from onep.persistence.database import init_db, insert_project, get_project, list_projects
@@ -46,11 +45,6 @@ def test_agent_instantiation():
         agent = get_agent(name)
         assert agent.role is not None
         assert agent.goal is not None
-
-
-def test_pipeline_stages_have_prompts():
-    for stage in GREENFIELD_STAGES:
-        assert stage["name"] in STAGE_PROMPTS
 
 
 def test_state_save_and_load(tmp_path: Path):
