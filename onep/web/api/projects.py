@@ -8,7 +8,7 @@ from pathlib import Path
 import git
 from fastapi import APIRouter, HTTPException
 
-from onep.cli.create import create_project, default_project_name
+from onep.application.projects import create_project, default_project_name
 from onep.greenfield.models import GreenfieldOptions
 from onep.harness.article import ArticleSynthesizer
 from onep.harness.interventions import merged_candidates, record_candidate_decision
@@ -24,7 +24,8 @@ router = APIRouter(prefix="/api", tags=["projects"])
 def _project_by_name(name: str):
     init_db()
     projects = list_projects()
-    project = next((p for p in projects if p.name == name), None)
+    project = next((p for p in projects if p.id == name), None)
+    project = project or next((p for p in projects if p.name == name), None)
     if project is None:
         raise HTTPException(status_code=404, detail=f"project not found: {name}")
     return project

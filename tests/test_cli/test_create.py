@@ -19,8 +19,10 @@ def test_create_help():
 
 
 def test_create_initializes_git_repository(tmp_path, monkeypatch):
-    monkeypatch.setattr("onep.cli.create.init_db", lambda: None)
-    monkeypatch.setattr("onep.cli.create.insert_project", lambda project: None)
+    monkeypatch.setattr("onep.application.projects.init_db", lambda: None)
+    monkeypatch.setattr(
+        "onep.application.projects.insert_project", lambda project: None
+    )
     monkeypatch.chdir(tmp_path)
 
     result = CliRunner().invoke(
@@ -43,9 +45,9 @@ def test_create_reuses_current_git_repository_and_config(tmp_path, monkeypatch):
         config.set_value("user", "name", "Local User")
         config.set_value("user", "email", "local@example.com")
         config.set_value("onep", "marker", "keep-me")
-    monkeypatch.setattr("onep.cli.create.init_db", lambda: None)
+    monkeypatch.setattr("onep.application.projects.init_db", lambda: None)
     inserted = []
-    monkeypatch.setattr("onep.cli.create.insert_project", inserted.append)
+    monkeypatch.setattr("onep.application.projects.insert_project", inserted.append)
     monkeypatch.chdir(tmp_path)
 
     result = CliRunner().invoke(
@@ -61,8 +63,10 @@ def test_create_reuses_current_git_repository_and_config(tmp_path, monkeypatch):
 
 def test_create_runs_engineering_loop_by_default(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("onep.cli.create.init_db", lambda: None)
-    monkeypatch.setattr("onep.cli.create.insert_project", lambda project: None)
+    monkeypatch.setattr("onep.application.projects.init_db", lambda: None)
+    monkeypatch.setattr(
+        "onep.application.projects.insert_project", lambda project: None
+    )
     called = []
     monkeypatch.setattr(
         "onep.orchestrator.runner.run_pipeline",

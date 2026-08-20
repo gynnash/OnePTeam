@@ -26,6 +26,9 @@ dependencies = [
 [project.scripts]
 onep = "onep.main:cli"
 
+[tool.setuptools.package-data]
+"onep.web" = ["ui/dist/index.html", "ui/dist/assets/*"]
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

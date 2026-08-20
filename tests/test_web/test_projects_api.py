@@ -112,6 +112,8 @@ def test_run_detail_endpoint(tmp_path, monkeypatch):
     detail = response.json()
     assert detail["stop_state"]["reason"] == "goals_satisfied"
     assert detail["stage_history"][-1]["stage"] == "stop"
+    project_id = client.get("/api/projects").json()["projects"][0]["id"]
+    assert client.get(f"/api/projects/{project_id}").status_code == 200
     assert client.get("/api/projects/missing").status_code == 404
 
 

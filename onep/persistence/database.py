@@ -69,6 +69,11 @@ def _db_path() -> Path:
     return _config_dir() / "meta.db"
 
 
+def database_path() -> Path:
+    """Return the metadata database path used by all local control state."""
+    return _db_path()
+
+
 def _connect() -> sqlite3.Connection:
     db_path = _db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)

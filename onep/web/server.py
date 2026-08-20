@@ -4,13 +4,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from onep.domain import Problem
 from onep.web import runtime
 from onep.web.api.events import router as events_router
 from onep.web.api.knowledge import router as knowledge_router
 from onep.web.api.projects import router as projects_router
+from onep.web.api_v1 import router as v1_router
 
 UI_DIST = Path(__file__).resolve().parent / "ui" / "dist"
 
@@ -27,11 +30,22 @@ FALLBACK_INDEX = """<!DOCTYPE html>
 </body></html>"""
 
 
-def create_app() -> FastAPI:
+def create_app(application=None) -> FastAPI:
     app = FastAPI(title="OnePTeam Web Console")
+    # Initialize V2 state only when a V2 endpoint is used. This keeps the
+    # read-only UI and legacy API usable in constrained environments.
+    app.state.application = application
+    app.include_router(v1_router)
     app.include_router(projects_router)
     app.include_router(knowledge_router)
     app.include_router(events_router)
+
+    @app.exception_handler(Problem)
+    async def problem_handler(_request: Request, exc: Problem) -> JSONResponse:
+        status = 404 if exc.code.endswith("_not_found") else 409
+        if exc.code in {"requirement_required", "git_worktree_required"}:
+            status = 400
+        return JSONResponse(status_code=status, content=exc.to_dict())
     if UI_DIST.exists():
         app.mount("/", StaticFiles(directory=str(UI_DIST), html=True), name="ui")
     else:

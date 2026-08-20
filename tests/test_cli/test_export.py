@@ -1,10 +1,10 @@
 import json
-from pathlib import Path
 from click.testing import CliRunner
 from onep.cli.export_cmd import export_group
 
 
 def test_export_json(tmp_path, monkeypatch):
+    monkeypatch.setattr("onep.persistence.database._config_dir", lambda: tmp_path)
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / "analysis_items.jsonl").write_text(
@@ -37,6 +37,7 @@ def test_export_json(tmp_path, monkeypatch):
 
 
 def test_export_json_format(tmp_path, monkeypatch):
+    monkeypatch.setattr("onep.persistence.database._config_dir", lambda: tmp_path)
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / "analysis_items.jsonl").write_text(

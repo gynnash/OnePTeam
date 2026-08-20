@@ -1,85 +1,17 @@
 """onep create and onep run — create and execute projects."""
 from __future__ import annotations
 
-import re
-import uuid
-from pathlib import Path
-
 import click
-import git as git_module
 from rich.console import Console
 from rich.panel import Panel
 
-from onep.persistence.database import init_db, insert_project
-from onep.persistence.models import Project, ProjectMode, PipelineState
-from onep.persistence.state import save_state
-from onep.tools.git import GitTool
+from onep.application.projects import (
+    create_project,
+    default_project_name as default_project_name,
+)
+from onep.domain import Problem
 
 console = Console()
-
-
-def default_project_name(requirement: str) -> str:
-    clean = re.sub(r"[^\w一-鿿]", "", requirement or "")[:20]
-    return clean or f"project-{uuid.uuid4().hex[:6]}"
-
-
-def create_project(
-    requirement: str,
-    name: str | None = None,
-    workspace: Path | None = None,
-    options=None,
-) -> Project:
-    """Create a project workspace (git init, README, state) and its DB row.
-
-    Does not start the loop; callers run it via run_pipeline (CLI) or the
-    web console's spawned subprocess.
-    """
-    init_db()
-    if name is None:
-        name = default_project_name(requirement)
-    if workspace is None:
-        workspace, _ = _resolve_workspace(Path.cwd())
-    workspace = Path(workspace).resolve()
-    repository_exists = False
-    try:
-        git_module.Repo(workspace)
-        repository_exists = True
-    except (git_module.InvalidGitRepositoryError, git_module.NoSuchPathError):
-        repository_exists = False
-
-    git_tool = GitTool(workspace=str(workspace))
-    if repository_exists:
-        dirty = git_module.Repo(workspace).git.status("--porcelain").splitlines()
-        if dirty:
-            raise click.ClickException(
-                "Current Git repository is dirty. Commit or stash changes first: "
-                + ", ".join(dirty)
-            )
-    (workspace / "docs").mkdir(parents=True, exist_ok=True)
-    readme = workspace / "README.md"
-    readme_created = not readme.exists()
-    if not readme.exists():
-        readme.write_text(f"# {name}\n\n{requirement}\n")
-
-    if not repository_exists:
-        git_tool.run(operation="init")
-
-    repo = git_module.Repo(workspace)
-    if not repo.head.is_valid() or readme_created:
-        git_tool.run(operation="add", paths="README.md")
-        git_tool.run(operation="commit", message="chore: initialize onep greenfield project")
-    _exclude_onep_runtime(repo)
-
-    project = Project(name=name, mode=ProjectMode.GREENFIELD, workspace_path=str(workspace))
-    project.requirement = requirement
-    insert_project(project)
-
-    if options is None:
-        from onep.greenfield.models import GreenfieldOptions
-        options = GreenfieldOptions()
-    state = PipelineState(artifacts={"greenfield_options": options.to_dict()})
-    save_state(workspace, state)
-    return project
 
 
 @click.command()
@@ -106,7 +38,10 @@ def create_cmd(requirement, name, no_run, max_rounds, max_repairs_per_slice,
         non_interactive=non_interactive,
         verbose=verbose,
     )
-    project = create_project(requirement, name=name, options=options)
+    try:
+        project = create_project(requirement, name=name, options=options)
+    except Problem as exc:
+        raise click.ClickException(str(exc)) from exc
     console.print(Panel.fit(
         f"[bold green]Project '{project.name}' created![/bold green]\n"
         f"Workspace: {project.workspace_path}\n"
@@ -121,28 +56,6 @@ def create_cmd(requirement, name, no_run, max_rounds, max_repairs_per_slice,
             raise click.ClickException(
                 f"Run did not complete. Resume with: onep run {project.name}"
             )
-
-
-def _resolve_workspace(current_dir: Path) -> tuple[Path, bool]:
-    """Use the current Git root, or initialize directly in the current directory."""
-    current_dir = current_dir.resolve()
-    try:
-        repo = git_module.Repo(current_dir, search_parent_directories=True)
-    except (git_module.InvalidGitRepositoryError, git_module.NoSuchPathError):
-        return current_dir, False
-    if repo.bare or repo.working_tree_dir is None:
-        raise click.ClickException("Current Git repository must have a working tree")
-    return Path(repo.working_tree_dir).resolve(), True
-
-
-def _exclude_onep_runtime(repo: git_module.Repo) -> None:
-    exclude = Path(repo.git_dir) / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    content = exclude.read_text() if exclude.exists() else ""
-    if ".onep/" not in content.splitlines():
-        separator = "" if not content or content.endswith("\n") else "\n"
-        exclude.write_text(content + separator + ".onep/\n")
-
 
 @click.command()
 @click.argument("project_name", type=str)
