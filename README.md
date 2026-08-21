@@ -14,7 +14,8 @@ OnePTeam 是一个面向通用软件开发的自主 Agent。用户提供一句�
 - 基于纵向切片批量实现功能，并对失败测试进行证据驱动修复
 - 聚焦测试、完整测试、补丁范围、只读评审和部署验证等确定性门禁
 - Git 分支隔离、断点续跑、成本预算、模型传输重试和运行审计
-- 首轮外部开源架构研究，后续轻量复盘；研究不可用时自动降级
+- 首次执行时进行外部开源架构研究；研究不可用时自动降级
+- 以原始需求为默认交付边界，验收通过后停止，不静默扩展额外产品范围
 - 将决策、实验、失败和洞察沉淀为项目知识与跨项目知识
 - CLI 和本地 Web 控制台两种操作入口
 - 独立的存量代码策略分析、交互式 Workbench 和自动优化流水线
@@ -28,17 +29,23 @@ flowchart LR
     A["一句话需求 + 当前仓库"] --> B["UNDERSTAND\n需求与验收合同"]
     B --> C["RESEARCH\n架构证据研究"]
     C --> D["DESIGN\n架构与切片计划"]
-    D --> E["PLAN / BUILD\n实现纵向切片"]
-    E --> F["VERIFY / REVIEW\n测试与只读评审"]
-    F --> G["REFLECT\n评估覆盖率与风险"]
-    G -->|仍有高价值工作| C
-    G -->|硬门禁通过| H["STOP / DISTILL\n文档与知识沉淀"]
+    D --> E["PLAN / BUILD\n实现纵向切片与证据驱动修复"]
+    E --> F["VERIFY / REVIEW\n聚焦/完整测试与只读评审"]
+    F -->|可修复失败| E
+    F --> G["REFLECT / ACCEPTANCE\n核对 P0/P1 与代码指纹"]
+    G -->|验收与硬门禁通过| H["FINAL VERIFY / STOP\n部署验证、文档与知识沉淀"]
+    G -->|阻塞或证据不足| I["BLOCK / FAIL\n保存检查点与诊断"]
 ```
 
-Harness 负责产品循环、模式路由、研究、反思、停止条件和知识沉淀；
-`onep/greenfield` 是共享的开发执行内核，负责验收合同、代码修改、测试、修复、
-评审、Git 提交和最终验证。当前代码仍保留 `onep analyze` / `onep optimize` 的
-存量代码专用入口。
+Harness 负责模式路由、研究、反思、停止条件和知识沉淀；稳定的应用侧执行入口是
+`onep.execution.kernel.ExecutionKernel`，当前由 `onep/greenfield` 中的共享工程
+内核实现，负责验收合同、代码修改、测试、修复、评审、Git 提交和最终验证。
+CLI 的 `onep create` 和 `onep run` 都通过与 Web 共用的 `ApplicationService` 调用
+该流程；当前代码仍保留 `onep analyze` / `onep optimize` 的存量代码专用入口。
+
+构建流程只实现用户给出的原始需求。P0/P1 验收项和硬门禁通过后，Harness 会直接
+完成交付，不会再自动发现并加入新的产品功能；需要继续探索存量仓库的改进机会时，
+应另行运行 `onep analyze` 或 `onep optimize`。
 
 ### 模式识别
 
@@ -175,6 +182,9 @@ onep create \
 系统默认立即启动自主循环。执行完成后，终端会打印需求覆盖情况、质量门禁、
 运行分支和审计目录。
 
+CLI 会同步等待本次构建结束；Web 控制台调用相同能力，但会把长任务加入持久化
+后台队列。
+
 如果只想初始化：
 
 ```bash
@@ -272,9 +282,9 @@ onep status
 onep run knowledge-base
 ```
 
-`onep run` 会读取项目创建时保存的选项、Harness 状态、验收合同、切片状态和 Git
-运行分支，不需要重新执行 `onep create`。`--stage` 只是旧流水线兼容提示，当前
-Harness 始终以持久化检查点为准：
+`onep run` 会通过 `run.resume` 能力读取 Harness 状态、验收合同、切片状态和 Git
+运行分支，不需要重新执行 `onep create`。该命令当前不提供重新设置运行选项的
+参数；`--stage` 只是旧流水线兼容提示，Harness 始终以持久化检查点为准：
 
 ```bash
 onep run knowledge-base --stage architect
@@ -450,8 +460,11 @@ onep action artifact.read \
   --payload '{"artifact":"prd"}'
 ```
 
-REST API 位于 `/api/v1`，包括能力发现、动作执行、Job 查询/取消和事件流。默认仍
-只监听环回地址；当前版本是本地单用户产品，不提供公网认证或多租户隔离。
+正式 REST API 位于 `/api/v1`，包括能力发现、项目查询、动作执行、Job 查询/取消
+和事件流。例如项目列表使用 `GET /api/v1/projects`，通用能力调用使用
+`POST /api/v1/actions/{capability_id}`。旧的未版本化项目读写路由已移除；仅知识和
+事件的只读兼容路由暂时保留。默认仍只监听环回地址；当前版本是本地单用户产品，
+不提供公网认证或多租户隔离。
 
 ## 知识与文章
 
@@ -509,8 +522,10 @@ OnePTeam 不以模型声称“完成”为交付依据。完成至少需要：
 5. 没有阻塞项，且部署验证按配置完成；
 6. 生成 README 和代码说明，并保存完整运行报告。
 
-循环还会依据最大轮次、成本预算、目标已满足、没有高价值工作、边际收益下降或
-用户停止请求决定是否结束。硬门禁未通过时，软停止条件不能把项目标记为成功。
+`onep create` / `onep run` 以原始需求为停止边界：验收合同和硬门禁全部满足后标记
+成功；修复预算耗尽、成本超限、阻塞或确定性门禁失败时保存诊断并停止，用户也可
+请求在下一个安全边界停止。`onep optimize` 的存量优化循环另外受最大轮次、候选
+价值和边际收益控制。任何软停止条件都不能绕过硬门禁把项目标记为成功。
 
 ## 常见问题
 
@@ -547,8 +562,10 @@ git add <files> && git commit -m "chore: save work"
 
 ### `model_api_interrupted` / `MidStreamFallbackError`
 
-这是模型流式连接中断，不代表代码逻辑失败。Harness 会保存可靠状态，传输重试不
-消耗切片修复预算。连接恢复后执行：
+这是模型流式连接中断，不代表代码逻辑失败。Harness 只对连接中断、限流或服务
+不可用等传输类错误进行退避重试，且传输重试不消耗切片修复预算。普通工具或编排
+异常不会被误判为网络问题：系统会保存当次 WIP、记录分类诊断并停止。连接恢复后
+执行：
 
 ```bash
 onep run PROJECT
@@ -569,9 +586,9 @@ onep/
 ├── domain/                 # 无框架依赖的 Job、Run、Problem 数据结构
 ├── application/            # CLI/Web 共用的能力注册与应用服务
 ├── infrastructure/         # SQLite WAL 事件库和持久任务队列
-├── execution/              # 租约、心跳和崩溃恢复 Worker
-├── harness/                # 统一产品循环、研究、反思和知识沉淀
-├── greenfield/             # 验收、切片开发、验证、修复和 Git 执行内核
+├── execution/              # 稳定 ExecutionKernel 入口、租约、心跳和恢复 Worker
+├── harness/                # 统一需求编排、研究、反思和知识沉淀
+├── greenfield/             # ExecutionKernel 当前实现及兼容的持久化模型
 ├── strategy/               # 存量代码扫描、Workbench 与自动优化
 ├── agents/                 # PM、架构师、开发、测试等 Agent 定义
 ├── llm/                    # LiteLLM 路由、流式工具调用和成本追踪
