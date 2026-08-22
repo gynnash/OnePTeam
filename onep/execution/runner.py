@@ -21,6 +21,7 @@ def run_worker(path: str | None = None, poll_seconds: float = 0.5) -> None:
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     while not stopped.is_set():
+        worker.touch()
         if worker.run_once() is None:
             stopped.wait(max(0.05, poll_seconds))
 

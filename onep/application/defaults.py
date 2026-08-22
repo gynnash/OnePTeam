@@ -21,6 +21,14 @@ from onep.application.project_actions import (
     project_delete,
 )
 from onep.application.service import ApplicationService, RequestContext
+from onep.application.settings import (
+    global_settings_read,
+    global_settings_update,
+    model_connection_test,
+    project_settings_read,
+    project_settings_update,
+    project_test_commands_discover,
+)
 from onep.application.workflows import analysis_handler, optimization_handler
 from onep.domain import Problem, RunRecord, RunStatus
 from onep.greenfield.models import GreenfieldOptions
@@ -46,7 +54,7 @@ def build_registry(store: ControlStore) -> CapabilityRegistry:
             lambda *_: {"capabilities": registry.describe()},
         ),
         Capability("project.list", "List projects", _list_projects),
-        Capability("project.detail", "Get project workbench", project_detail),
+        Capability("project.detail", "Get project workbench", _project_detail(store)),
         Capability(
             "project.create",
             "Create project",
@@ -107,6 +115,32 @@ def build_registry(store: ControlStore) -> CapabilityRegistry:
         ),
         Capability("memory.status", "Get memory statistics", memory_status),
         Capability("memory.search", "Search persistent memory", memory_search),
+        Capability("settings.global.read", "Read global settings", global_settings_read),
+        Capability(
+            "settings.global.update",
+            "Update global settings",
+            global_settings_update(store),
+            mutating=True,
+        ),
+        Capability("project.settings.read", "Read project settings", project_settings_read),
+        Capability(
+            "project.settings.update",
+            "Update project settings",
+            project_settings_update,
+            mutating=True,
+        ),
+        Capability(
+            "project.test_commands.discover",
+            "Discover project quality commands",
+            project_test_commands_discover,
+        ),
+        Capability(
+            "settings.model.test",
+            "Test model connectivity",
+            model_connection_test,
+            mutating=True,
+            background=True,
+        ),
         Capability("analysis.export", "Export analysis results", analysis_export),
         Capability(
             "project.delete",
@@ -176,7 +210,7 @@ def _create_project(payload, _context) -> dict[str, Any]:
             actionable=True,
         )
     raw_options = dict(payload.get("options") or {})
-    options = GreenfieldOptions.from_dict(raw_options)
+    options = GreenfieldOptions.configured(raw_options)
     workspace = str(payload.get("workspace_path") or "").strip()
     project = create_project(
         requirement,
@@ -201,6 +235,17 @@ def _v2_only(store: ControlStore, handler):
         return handler(payload, context)
 
     return guarded
+
+
+def _project_detail(store: ControlStore):
+    def read(payload, context):
+        result = project_detail(payload, context)
+        result["mutations_supported"] = (
+            store.latest_run_for_project(result["project"]["id"]) is not None
+        )
+        return result
+
+    return read
 
 
 def _run_handler(store: ControlStore, *, resume: bool = False):
@@ -228,7 +273,11 @@ def _run_handler(store: ControlStore, *, resume: bool = False):
         from onep.orchestrator.runner import run_pipeline
 
         try:
-            run_options = GreenfieldOptions.from_dict(payload.get("options"))
+            run_options = (
+                GreenfieldOptions.configured(dict(payload.get("options") or {}))
+                if "options" in payload
+                else None
+            )
             completed = run_pipeline(project.name, options=run_options)
         except Exception as exc:
             store.update_run(run_id, status=RunStatus.FAILED, stage="failed")

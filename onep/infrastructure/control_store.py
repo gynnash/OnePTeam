@@ -81,6 +81,10 @@ class ControlStore:
                 );
                 CREATE INDEX IF NOT EXISTS v2_events_run_sequence
                     ON v2_events(run_id, sequence);
+                CREATE TABLE IF NOT EXISTS v2_workers (
+                    id TEXT PRIMARY KEY,
+                    last_seen TEXT NOT NULL
+                );
                 """
             )
             columns = {
@@ -397,6 +401,57 @@ class ControlStore:
                 (min(max(1, limit), 200),),
             ).fetchall()
         return [self._job(row) for row in rows]
+
+    def has_active_jobs(self) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM v2_jobs
+                WHERE status IN (?, ?, ?)
+                LIMIT 1
+                """,
+                (
+                    JobStatus.QUEUED.value,
+                    JobStatus.RUNNING.value,
+                    JobStatus.CANCEL_REQUESTED.value,
+                ),
+            ).fetchone()
+        return row is not None
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        job = self.get_job(job_id)
+        return bool(job and job.status in {
+            JobStatus.CANCEL_REQUESTED,
+            JobStatus.CANCELLED,
+        })
+
+    def worker_heartbeat(self, worker_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO v2_workers (id, last_seen) VALUES (?, ?)
+                ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen
+                """,
+                (worker_id, _now()),
+            )
+
+    def worker_health(self, stale_after: int = 10) -> dict[str, Any]:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=max(1, stale_after))
+        ).isoformat()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, last_seen FROM v2_workers
+                ORDER BY last_seen DESC LIMIT 1
+                """
+            ).fetchone()
+        ready = bool(row and row["last_seen"] >= cutoff)
+        return {
+            "ready": ready,
+            "worker_id": row["id"] if row else "",
+            "last_seen": row["last_seen"] if row else "",
+        }
 
     def create_run(self, run: RunRecord) -> RunRecord:
         now = _now()

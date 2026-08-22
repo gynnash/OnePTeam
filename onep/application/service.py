@@ -15,6 +15,7 @@ class RequestContext:
     actor: str = "local-user"
     project_id: str = ""
     run_id: str = ""
+    job_id: str = ""
     trace_id: str = ""
 
     def with_trace(self) -> "RequestContext":
@@ -24,6 +25,7 @@ class RequestContext:
             actor=self.actor,
             project_id=self.project_id,
             run_id=self.run_id,
+            job_id=self.job_id,
             trace_id=uuid4().hex,
         )
 

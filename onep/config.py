@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import tempfile
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -54,10 +55,21 @@ class PipelineConfig:
 
 
 @dataclass
+class RunDefaultsConfig:
+    max_rounds: int = 100
+    max_repairs_per_slice: int = 8
+    max_cost: float = 0.0
+    deploy_mode: str = "verify"
+    non_interactive: bool = False
+    verbose: bool = False
+
+
+@dataclass
 class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     project: ProjectConfig = field(default_factory=ProjectConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    run_defaults: RunDefaultsConfig = field(default_factory=RunDefaultsConfig)
 
 
 def _default_config_yaml() -> str:
@@ -93,13 +105,21 @@ def load_config() -> Config:
     llm = LLMConfig(**(raw.get("llm") or {}))
     project = ProjectConfig(**(raw.get("project") or {}))
     pipeline = PipelineConfig(**(raw.get("pipeline") or {}))
-    return Config(llm=llm, project=project, pipeline=pipeline)
+    run_defaults = RunDefaultsConfig(**(raw.get("run_defaults") or {}))
+    return Config(
+        llm=llm,
+        project=project,
+        pipeline=pipeline,
+        run_defaults=run_defaults,
+    )
 
 
 def save_config(config: Config) -> None:
     """Save config back to disk."""
     _ensure_config()
-    raw = {
+    config_file = _config_path()
+    raw = yaml.safe_load(config_file.read_text()) or {}
+    raw.update({
         "llm": {
             "default_model": config.llm.default_model,
             "default_provider": config.llm.default_provider,
@@ -115,5 +135,23 @@ def save_config(config: Config) -> None:
             "test_timeout": config.pipeline.test_timeout,
             "stage_output_tokens": config.pipeline.stage_output_tokens,
         },
-    }
-    _config_path().write_text(yaml.dump(raw, default_flow_style=False))
+        "run_defaults": dataclasses.asdict(config.run_defaults),
+    })
+    _atomic_write(config_file, yaml.dump(raw, default_flow_style=False))
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=str(path.parent), text=True
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)

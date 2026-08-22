@@ -64,7 +64,7 @@ CLI 的 `onep create` 和 `onep run` 都通过与 Web 共用的 `ApplicationServ
 - Git，并且执行仓库位于具名分支而非 detached HEAD
 - 至少一个兼容 LiteLLM 的模型 API
 - 可选：Docker，用于容器部署验证
-- 可选：Node.js 18+，仅用于开发 Web 前端或构建 JavaScript 项目
+- 可选：Node.js 22.22+，仅用于开发 Web 前端或构建 JavaScript 项目
 - 可选：`GITHUB_TOKEN`，提高首轮开源架构研究的 GitHub API 配额
 
 ## 安装
@@ -140,6 +140,14 @@ pipeline:
     strategy_architect: 8192
     optimize_developer: 8192
     code_reviewer: 4096
+
+run_defaults:
+  max_rounds: 100
+  max_repairs_per_slice: 8
+  max_cost: 0.0
+  deploy_mode: verify
+  non_interactive: false
+  verbose: false
 
 # 以下部分由对应模块直接读取，可以按需添加
 web:
@@ -420,19 +428,25 @@ onep web
 onep web --host 127.0.0.1 --port 8311
 ```
 
-浏览器打开 `http://127.0.0.1:8311`。V2 控制台不是终端日志的简单包装，而是按
-项目组织的工作台，包含概览、需求、计划、执行、验证、变更、知识和设置八个视图。
-模型执行过程按 `Now / Step / Evidence / Debug` 四层展示：默认只突出当前目标和
-结果，需要排障时再展开工具、测试和结构化事件。
+浏览器打开 `http://127.0.0.1:8311`。控制台采用“任务运行中心”信息架构：全局提供
+控制台、项目、任务、知识和设置五个入口；项目工作台按目标、计划、执行、验证和
+交付生命周期组织。当前阶段、工作项和质量证据默认结构化展示，原始事件与 JSON
+收纳在按需展开的检查器中。
 
-首页可直接选择“构建应用”“分析代码”或“自动优化”。后两者复用现有
-`onep analyze` / `onep optimize` 算法，在受控后台进程中执行；运行状态、失败摘要
-和最终结果统一显示在后台任务面板。
+右上角“新建任务”可选择“构建应用”“分析代码”或“自动优化”。后两者复用现有
+`onep analyze` / `onep optimize` 算法，在受控后台进程中执行，并会把用户填写的
+补充目标传给分析模型。运行中的外部流程可从任务中心取消；系统会终止对应进程组。
 
-`onep web` 会同时启动 FastAPI 服务和独立 Worker。创建、续跑、文章生成等长任务
+`onep web` 会同时启动 FastAPI 服务和独立 Worker。顶部连接状态同时检查 API、
+SSE 和 Worker 心跳，不再用静态文案推测可用性。创建、续跑、文章生成等长任务
 先写入 SQLite WAL 队列，再由 Worker 执行；刷新页面或 Web 进程重启不会丢失已排队
-任务。页面通过 SSE 接收实时事件，并以轮询作为兼容兜底。同一个项目同一时刻只会
+任务。页面通过 SSE 接收实时事件，并只在连接不可用时使用低频轮询兜底。同一个项目同一时刻只会
 运行一个可写任务，重复请求通过 `X-Action-ID` 幂等键合并。
+
+全局设置支持模型路由、测试超时和新运行默认值；项目设置可覆盖模型、预算、轮次、
+部署模式和质量命令。项目设置只影响下一次启动或续跑，当前运行快照不可变。模型
+密钥只显示“已配置/未配置”，不会由 Web API 返回；质量命令保存前会复用服务端
+安全校验，并可从项目文件中自动发现。
 
 Web 服务当前没有身份认证，默认仅监听 `127.0.0.1`。除非前面另有可信反向代理
 和访问控制，否则不要绑定到公网地址。
@@ -441,13 +455,18 @@ Web 服务当前没有身份认证，默认仅监听 `127.0.0.1`。除非前面�
 
 ```bash
 cd onep/web/ui
-npm install
+npm ci
 npm run dev
 
 # 生成由 Python 包直接托管的静态资源
 npm run build
-npm exec tsc -- --noEmit
+npm run typecheck
+npm test
 ```
+
+前端使用 React 19、React Router 8（Hash Router）、TanStack Query、Zustand、
+Radix、Tailwind CSS 4 和本地打包字体。组件、状态归属、视觉 token 与交互规范见
+[`docs/WEB_DESIGN_SYSTEM.md`](docs/WEB_DESIGN_SYSTEM.md)。
 
 Web 与 CLI 共用 `ApplicationService` 和显式 Capability Registry。高级集成或排障
 时可以直接查看、调用同一能力合同：
@@ -460,8 +479,9 @@ onep action artifact.read \
   --payload '{"artifact":"prd"}'
 ```
 
-正式 REST API 位于 `/api/v1`，包括能力发现、项目查询、动作执行、Job 查询/取消
-和事件流。例如项目列表使用 `GET /api/v1/projects`，通用能力调用使用
+正式 REST API 位于 `/api/v1`，包括能力发现、健康检查、项目查询、设置、动作执行、
+Job 查询/取消和事件流。例如项目列表使用 `GET /api/v1/projects`，健康状态使用
+`GET /api/v1/health`，通用能力调用使用
 `POST /api/v1/actions/{capability_id}`。旧的未版本化项目读写路由已移除；仅知识和
 事件的只读兼容路由暂时保留。默认仍只监听环回地址；当前版本是本地单用户产品，
 不提供公网认证或多租户隔离。

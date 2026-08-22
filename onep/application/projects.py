@@ -74,10 +74,13 @@ def create_project(
     if options is None:
         from onep.greenfield.models import GreenfieldOptions
 
-        options = GreenfieldOptions()
+        options = GreenfieldOptions.configured()
     save_state(
         workspace,
-        PipelineState(artifacts={"greenfield_options": options.to_dict()}),
+        PipelineState(artifacts={
+            "greenfield_options": options.to_dict(),
+            "greenfield_options_schema": 2,
+        }),
     )
     return project
 

@@ -52,6 +52,7 @@ console = Console()
               help="Impact levels to auto-execute (comma-separated)")
 @click.option("--max-cost", type=click.FloatRange(min=0), default=0)
 @click.option("--name", "-n", default=None)
+@click.option("--goal", default="", help="Optional focus for this optimization")
 @click.option("--test-command", "test_commands", multiple=True,
               help="External test gate command; may be repeated")
 @click.option("--integration-test-command", "integration_commands", multiple=True,
@@ -62,6 +63,7 @@ def optimize_cmd(
     auto_approve: str,
     max_cost: float,
     name: str | None,
+    goal: str,
     test_commands: tuple[str, ...],
     integration_commands: tuple[str, ...],
 ):
@@ -102,9 +104,11 @@ def optimize_cmd(
         / "projects" / name / "workspace"
     )
     workspace.mkdir(parents=True, exist_ok=True)
+    goal = goal.strip()
     insert_project(Project(
         name=name, mode=ProjectMode.BROWNFIELD,
         workspace_path=str(workspace),
+        requirement=goal,
     ))
 
     run_id = f"{__import__('datetime').datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"
@@ -124,7 +128,7 @@ def optimize_cmd(
     recorder = OptimizeRunRecorder(run_dir, run)
     recorder.record_event("run_started", {
         "source": source_path, "max_rounds": max_rounds,
-        "max_cost": max_cost,
+        "max_cost": max_cost, "goal": goal,
     })
     flow = OptimizeFlow(recorder.record_event)
     tracker = CostTracker(max_cost)
@@ -160,11 +164,23 @@ def optimize_cmd(
                 analysis_files = repo_map.paths(analysis_source, affected)
                 context = build_project_context(str(analysis_source), workspace)
                 context = context + "\n\n" + repo_map.render(affected)
+            analysis_kwargs = {
+                "budgeted": lambda stage_name, **kw: budgeted_invoke(
+                    llm, tracker, stage_name, **kw
+                ),
+                "memory_context": _memory_context,
+            }
+            # Keep third-party/testing analyze_source adapters compatible when
+            # no Web/CLI focus goal was supplied.
+            if goal:
+                analysis_kwargs["goal"] = goal
             items = analyze_source(
-                analysis_source, llm, tracker, name, analysis_files,
-                budgeted=lambda stage_name, **kw: budgeted_invoke(
-                    llm, tracker, stage_name, **kw),
-                memory_context=_memory_context,
+                analysis_source,
+                llm,
+                tracker,
+                name,
+                analysis_files,
+                **analysis_kwargs,
             )
             flow.transition(
                 OptimizeFlowStage.PLAN, {"items": len(items)}

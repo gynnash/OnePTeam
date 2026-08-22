@@ -56,6 +56,27 @@ def capabilities(request: Request):
     return {"capabilities": _application(request).registry.describe()}
 
 
+@router.get("/health")
+def health(request: Request):
+    worker = _application(request).store.worker_health()
+    return {
+        "status": "ready" if worker["ready"] else "degraded",
+        "api": "ready",
+        "database": "ready",
+        "worker": worker,
+    }
+
+
+@router.get("/settings")
+def global_settings(request: Request):
+    return _application(request).execute("settings.global.read").data
+
+
+@router.patch("/settings")
+def update_global_settings(payload: dict[str, Any], request: Request):
+    return _application(request).execute("settings.global.update", payload).data
+
+
 @router.get("/projects")
 def projects(request: Request):
     return _application(request).execute("project.list").data
@@ -65,6 +86,32 @@ def projects(request: Request):
 def project_detail(project_ref: str, request: Request):
     return _application(request).execute(
         "project.detail", context=RequestContext(project_id=project_ref)
+    ).data
+
+
+@router.get("/projects/{project_ref}/settings")
+def project_settings(project_ref: str, request: Request):
+    return _application(request).execute(
+        "project.settings.read", context=RequestContext(project_id=project_ref)
+    ).data
+
+
+@router.patch("/projects/{project_ref}/settings")
+def update_project_settings(
+    project_ref: str, payload: dict[str, Any], request: Request
+):
+    return _application(request).execute(
+        "project.settings.update",
+        payload,
+        context=RequestContext(project_id=project_ref),
+    ).data
+
+
+@router.post("/projects/{project_ref}/settings/test-commands/discover")
+def discover_project_test_commands(project_ref: str, request: Request):
+    return _application(request).execute(
+        "project.test_commands.discover",
+        context=RequestContext(project_id=project_ref),
     ).data
 
 

@@ -130,6 +130,7 @@ class GreenfieldEngine:
             )
             state.artifacts["greenfield_run_id"] = run.id
             state.artifacts["greenfield_options"] = run.options.to_dict()
+            state.artifacts["greenfield_options_schema"] = 2
             save_state(workspace, state)
         elif options is not None:
             run.options = options

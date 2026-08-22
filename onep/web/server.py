@@ -41,7 +41,13 @@ def create_app(application=None) -> FastAPI:
     @app.exception_handler(Problem)
     async def problem_handler(_request: Request, exc: Problem) -> JSONResponse:
         status = 404 if exc.code.endswith("_not_found") else 409
-        if exc.code in {"requirement_required", "git_worktree_required"}:
+        if exc.code in {
+            "requirement_required",
+            "git_worktree_required",
+            "invalid_settings",
+            "invalid_test_command",
+            "source_required",
+        }:
             status = 400
         return JSONResponse(status_code=status, content=exc.to_dict())
     if UI_DIST.exists():

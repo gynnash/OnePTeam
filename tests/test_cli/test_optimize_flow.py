@@ -48,6 +48,23 @@ def test_optimize_records_typed_flow_order(tmp_path, monkeypatch):
     ]
 
 
+def test_optimize_forwards_user_goal_to_analysis(tmp_path, monkeypatch):
+    services = install_fake_optimize_services(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(
+        optimize_cmd,
+        [
+            str(services.source),
+            "--max-rounds", "1",
+            "--name", "demo",
+            "--goal", "减少首页重复请求",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert services.analyzed_goals == ["减少首页重复请求"]
+
+
 def test_budget_mode_rejects_models_without_pricing(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

@@ -63,17 +63,24 @@ class GreenfieldOptions:
     deploy_mode: str = "verify"
     non_interactive: bool = False
     verbose: bool = False
+    default_model: str = ""
+    default_provider: str = ""
+    complex_model: str = ""
+    complex_provider: str = ""
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "GreenfieldOptions":
+    def from_dict(
+        cls,
+        data: dict[str, Any] | None,
+        *,
+        migrate_legacy: bool = True,
+    ) -> "GreenfieldOptions":
         raw = data or {}
         max_rounds = max(1, int(raw.get("max_rounds", 100)))
-        # Migrate the former default for resumable runs. Explicit non-default
-        # limits are preserved.
-        if max_rounds == 12:
+        if migrate_legacy and max_rounds == 12:
             max_rounds = 100
         max_repairs = max(1, int(raw.get("max_repairs_per_slice", 8)))
-        if max_repairs == 3:
+        if migrate_legacy and max_repairs == 3:
             max_repairs = 8
         return cls(
             max_rounds=max_rounds,
@@ -83,7 +90,21 @@ class GreenfieldOptions:
             deploy_mode=str(raw.get("deploy_mode") or "verify"),
             non_interactive=bool(raw.get("non_interactive", False)),
             verbose=bool(raw.get("verbose", False)),
+            default_model=str(raw.get("default_model") or ""),
+            default_provider=str(raw.get("default_provider") or ""),
+            complex_model=str(raw.get("complex_model") or ""),
+            complex_provider=str(raw.get("complex_provider") or ""),
         )
+
+    @classmethod
+    def configured(cls, data: dict[str, Any] | None = None) -> "GreenfieldOptions":
+        """Merge explicit values over non-secret global run defaults."""
+        from dataclasses import asdict as _asdict
+        from onep.config import load_config
+
+        raw = _asdict(load_config().run_defaults)
+        raw.update({key: value for key, value in (data or {}).items() if value is not None})
+        return cls.from_dict(raw, migrate_legacy=False)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -215,6 +236,7 @@ class GreenfieldRun:
             "stage": self.stage.value,
             "status": self.status.value,
             "options": self.options.to_dict(),
+            "options_schema_version": 2,
             "slices": [item.to_dict() for item in self.slices],
         }
 
@@ -227,7 +249,10 @@ class GreenfieldRun:
             workspace=str(data["workspace"]),
             stage=GreenfieldStage(data.get("stage", "init")),
             status=GreenfieldStatus(data.get("status", "pending")),
-            options=GreenfieldOptions.from_dict(data.get("options")),
+            options=GreenfieldOptions.from_dict(
+                data.get("options"),
+                migrate_legacy=int(data.get("options_schema_version") or 1) < 2,
+            ),
             base_branch=str(data.get("base_branch") or ""),
             base_commit=str(data.get("base_commit") or ""),
             run_branch=str(data.get("run_branch") or ""),

@@ -52,6 +52,7 @@ console = Console()
 @click.option("--name", "-n", default=None, help="Project name")
 @click.option("--max-cost", type=float, default=0,
               help="Maximum cost in USD (0 = no limit)")
+@click.option("--goal", default="", help="Optional focus for this analysis")
 @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
 @click.option("--from-layer", "from_layer", type=click.Choice(["1", "2", "3"]),
               default=None, help="Start from specific layer")
@@ -59,6 +60,7 @@ console = Console()
 @click.option("--export", "export_path", type=click.Path(path_type=Path),
               default=None, help="Write the final Markdown or JSON report")
 def analyze_cmd(source: str, mode: str, name: str | None, max_cost: float = 0,
+                goal: str = "",
                 resume: bool = False, from_layer: str | None = None,
                 no_dialogue: bool = False,
                 export_path: Path | None = None):
@@ -75,14 +77,20 @@ def analyze_cmd(source: str, mode: str, name: str | None, max_cost: float = 0,
     project_root = Path(os.path.expanduser(config.project.root_dir))
     workspace = (project_root / "projects" / name / "workspace")
     workspace.mkdir(parents=True, exist_ok=True)
-    project = Project(name=name, mode=ProjectMode.BROWNFIELD, workspace_path=str(workspace))
+    goal = goal.strip()
+    project = Project(
+        name=name,
+        mode=ProjectMode.BROWNFIELD,
+        workspace_path=str(workspace),
+        requirement=goal,
+    )
     insert_project(project)
     console.print(f"[bold]Source:[/bold] {source_path}\n[bold]Workspace:[/bold] {workspace}")
     if mode == "strategy":
         _run_strategy_mode(source_path, workspace, name,
                           from_layer=from_layer, max_cost=max_cost,
                           resume=resume, no_dialogue=no_dialogue,
-                          export_path=export_path)
+                          export_path=export_path, goal=goal)
     else:
         console.print(f"[yellow]Mode '{mode}' not yet implemented.[/yellow]")
 
@@ -257,7 +265,7 @@ def _invoke_agent_with_tools(
 def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str,
                       from_layer: str | None = None, max_cost: float = 0,
                       resume: bool = False, no_dialogue: bool = False,
-                      export_path: Path | None = None) -> None:
+                      export_path: Path | None = None, goal: str = "") -> None:
     tracker = CostTracker(budget=max_cost)
 
     # Resume from checkpoint
@@ -452,6 +460,11 @@ def _run_strategy_mode(source_path: Path, workspace: Path, project_name: str,
                 file_list="\n".join(f"- {f}" for f in strategy_files),
                 source_root=str(source_path),
             )
+            if goal:
+                prompt += (
+                    "\n\n本次分析的用户目标：\n"
+                    f"{goal}\n请围绕该目标排序机会，同时保留关键风险。"
+                )
             prompt = _append_analysis_memory(
                 prompt,
                 "strategy_architect",

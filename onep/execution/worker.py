@@ -30,6 +30,7 @@ class Worker:
             actor=job.actor,
             project_id=job.project_id,
             run_id=job.run_id,
+            job_id=job.id,
             trace_id=self._trace_id(job),
         )
         heartbeat_stop = Event()
@@ -83,10 +84,15 @@ class Worker:
     def _heartbeat(self, job_id: str, stopped: Event) -> None:
         interval = max(0.1, self.lease_seconds / 3)
         while not stopped.wait(interval):
+            self.store.worker_heartbeat(self.worker_id)
             if not self.store.heartbeat(
                 job_id, self.worker_id, self.lease_seconds
             ):
                 return
+
+    def touch(self) -> None:
+        """Publish worker readiness even while the queue is idle."""
+        self.store.worker_heartbeat(self.worker_id)
 
     def _trace_id(self, job: Job) -> str:
         events = self.store.events(

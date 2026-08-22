@@ -105,12 +105,14 @@ def install_fake_optimize_services(monkeypatch, tmp_path):
     FakeCoordinator.executed.clear()
     generated = []
     analyzed_paths = []
+    analyzed_goals = []
 
     def analyze(
         path, llm, tracker, project_name="", source_files=None,
-        budgeted=None, memory_context=None,
+        goal="", budgeted=None, memory_context=None,
     ):
         analyzed_paths.append(Path(path))
+        analyzed_goals.append(goal)
         return [
             StrategyItem(
                 id="si-1",
@@ -150,6 +152,7 @@ def install_fake_optimize_services(monkeypatch, tmp_path):
         source=source,
         generated=generated,
         analyzed_paths=analyzed_paths,
+        analyzed_goals=analyzed_goals,
         coordinator=FakeCoordinator,
         recorder=FakeRecorder,
         git=FakeGitSession,

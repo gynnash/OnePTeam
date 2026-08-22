@@ -1,7 +1,9 @@
 """Runtime pipeline state stored in project/.onep/state.yaml."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import tempfile
 import yaml
 
 from onep.persistence.models import PipelineState, ProjectMode
@@ -30,7 +32,7 @@ def load_state(workspace: Path) -> PipelineState:
 def save_state(workspace: Path, state: PipelineState) -> None:
     sp = state_path(workspace)
     sp.parent.mkdir(parents=True, exist_ok=True)
-    sp.write_text(yaml.dump({
+    content = yaml.dump({
         "mode": state.mode.value,
         "current_stage": state.current_stage,
         "stages_completed": state.stages_completed,
@@ -38,4 +40,16 @@ def save_state(workspace: Path, state: PipelineState) -> None:
         "langgraph_checkpoint_id": state.langgraph_checkpoint_id,
         "retry_attempts": state.retry_attempts,
         "artifacts": state.artifacts,
-    }, default_flow_style=False))
+    }, default_flow_style=False)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{sp.name}.", dir=str(sp.parent), text=True
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, sp)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)

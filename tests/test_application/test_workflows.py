@@ -40,6 +40,23 @@ def test_analysis_uses_fixed_argument_list_and_streams_events(tmp_path, monkeypa
     ]
 
 
+def test_analysis_forwards_user_goal(tmp_path, monkeypatch):
+    store = ControlStore(tmp_path / "control.db")
+    captured = {}
+    monkeypatch.setattr(
+        "onep.application.workflows.subprocess.Popen",
+        lambda command, **_kwargs: captured.update(command=command) or Process(),
+    )
+
+    analysis_handler(store)(
+        {"source": str(tmp_path), "goal": "重点检查实时刷新与错误恢复"},
+        RequestContext(trace_id="trace"),
+    )
+
+    position = captured["command"].index("--goal")
+    assert captured["command"][position + 1] == "重点检查实时刷新与错误恢复"
+
+
 def test_optimization_failure_returns_stable_problem(tmp_path, monkeypatch):
     store = ControlStore(tmp_path / "control.db")
     monkeypatch.setattr(
@@ -56,3 +73,25 @@ def test_optimization_failure_returns_stable_problem(tmp_path, monkeypatch):
 
     assert error.value.code == "workflow_failed"
     assert "done" in error.value.detail
+
+
+def test_external_workflow_honors_cancel_request(tmp_path, monkeypatch):
+    store = ControlStore(tmp_path / "control.db")
+    process = Process()
+    terminated = []
+    monkeypatch.setattr(
+        "onep.application.workflows.subprocess.Popen", lambda *_args, **_kwargs: process
+    )
+    monkeypatch.setattr(store, "is_cancel_requested", lambda _job_id: True)
+    monkeypatch.setattr(
+        "onep.application.workflows._terminate", lambda candidate: terminated.append(candidate)
+    )
+
+    with pytest.raises(Problem) as error:
+        optimization_handler(store)(
+            {"source": str(tmp_path), "goal": "减少启动耗时"},
+            RequestContext(job_id="job-1", trace_id="trace"),
+        )
+
+    assert error.value.code == "workflow_cancelled"
+    assert terminated == [process]

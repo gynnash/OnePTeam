@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from onep.strategy.analyze_pipeline import (
     analyze_source,
     candidate_from_item,
@@ -29,6 +27,27 @@ def test_analyze_source_scans_and_produces_strategy_items(tmp_path):
     assert len(items) == 1
     assert items[0].id.startswith("si-")
     assert items[0].title == "Cache"
+
+
+def test_analyze_source_includes_user_goal_in_architect_prompt(tmp_path):
+    class CapturingLLM(ScanLLM):
+        def __init__(self):
+            super().__init__()
+            self.architect_prompt = ""
+
+        def invoke(self, system_prompt=None, user_prompt=None, stage_name=None):
+            if stage_name == "strategy_architect":
+                self.architect_prompt = user_prompt or ""
+            return super().invoke(system_prompt, user_prompt, stage_name)
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("value = 1\n")
+    llm = CapturingLLM()
+
+    analyze_source(source, llm, project_name="demo", goal="减少首页请求数量")
+
+    assert "减少首页请求数量" in llm.architect_prompt
 
 
 def test_analyze_source_returns_empty_without_strategy_files(tmp_path):

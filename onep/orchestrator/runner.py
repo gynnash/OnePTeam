@@ -37,6 +37,12 @@ def run_pipeline(
 
         state = load_state(Path(project.workspace_path))
         options = GreenfieldOptions.from_dict(
-            state.artifacts.get("greenfield_options")
+            state.artifacts.get("greenfield_options"),
+            migrate_legacy=int(
+                state.artifacts.get("greenfield_options_schema") or 1
+            ) < 2,
         )
-    return HarnessEngine(console).run(project, options)
+    from onep.llm.router import model_overrides
+
+    with model_overrides(options):
+        return HarnessEngine(console).run(project, options)

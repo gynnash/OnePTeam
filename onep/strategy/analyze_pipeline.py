@@ -65,6 +65,7 @@ def analyze_source(
     tracker: CostTracker | None = None,
     project_name: str = "",
     source_files: list[Path] | None = None,
+    goal: str = "",
     budgeted: Callable[..., str] | None = None,
     memory_context: Callable[[str, str, str, str], str] | None = None,
 ) -> list[StrategyItem]:
@@ -72,7 +73,10 @@ def analyze_source(
     from onep.orchestrator.brownfield import ANALYZE_PROMPT, SCAN_PROMPT_FULL
 
     if budgeted is None:
-        budgeted = lambda **kw: _plain_invoke(llm, tracker, **kw)
+        def invoke_without_budget_callback(**kwargs):
+            return _plain_invoke(llm, tracker, **kwargs)
+
+        budgeted = invoke_without_budget_callback
 
     def _memory(stage: str, query: str, item_id: str = "") -> str:
         if memory_context is None:
@@ -110,14 +114,20 @@ def analyze_source(
     strategy_files = get_strategy_files(scan_results)
     if not strategy_files:
         return []
+    analysis_prompt = ANALYZE_PROMPT.format(
+        file_list="\n".join(f"- {path}" for path in strategy_files),
+        source_root=str(source),
+    )
+    if goal.strip():
+        analysis_prompt += (
+            "\n\nUser optimization goal:\n"
+            f"{goal.strip()}\nPrioritize findings that advance this goal."
+        )
     response = budgeted(
         stage_name="strategy_architect",
         system_prompt="You are the strategy architect.",
         user_prompt=append_memory_context(
-            ANALYZE_PROMPT.format(
-                file_list="\n".join(f"- {path}" for path in strategy_files),
-                source_root=str(source),
-            ),
+            analysis_prompt,
             _memory(
                 "strategy_architect", "discover optimization opportunities"
             ) if project_name else "",

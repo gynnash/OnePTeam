@@ -5,3 +5,5 @@ __pycache__/
 .env
 *.egg-info/
 docs/
+!docs/WEB_DESIGN_SYSTEM.md
+

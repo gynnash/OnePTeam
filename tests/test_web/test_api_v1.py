@@ -14,7 +14,27 @@ def test_capabilities_expose_shared_actions(tmp_path):
 
     assert response.status_code == 200
     ids = {item["id"] for item in response.json()["capabilities"]}
-    assert {"project.create", "run.start", "artifact.read", "memory.search"} <= ids
+    assert {
+        "project.create",
+        "run.start",
+        "artifact.read",
+        "memory.search",
+        "settings.global.read",
+        "project.settings.update",
+    } <= ids
+
+
+def test_health_reports_worker_readiness(tmp_path):
+    app = build_application(tmp_path / "control.db")
+    web = TestClient(create_app(app))
+
+    degraded = web.get("/api/v1/health")
+    app.store.worker_heartbeat("worker-web")
+    ready = web.get("/api/v1/health")
+
+    assert degraded.json()["status"] == "degraded"
+    assert ready.json()["status"] == "ready"
+    assert ready.json()["worker"]["worker_id"] == "worker-web"
 
 
 def test_background_action_is_idempotent_and_job_reports_result(tmp_path):
@@ -68,4 +88,43 @@ def test_v1_workbench_reads_project_by_id(tmp_path, monkeypatch):
 
     assert detail.status_code == 200
     assert detail.json()["run"]["stop_state"]["reason"] == "goals_satisfied"
+    assert detail.json()["mutations_supported"] is False
     assert logs.status_code == candidates.status_code == knowledge.status_code == 200
+
+
+def test_project_settings_preserve_explicit_legacy_default_values(tmp_path, monkeypatch):
+    seed_project(tmp_path, monkeypatch, name="settings-demo")
+    web = client(tmp_path)
+    project = web.get("/api/v1/projects").json()["projects"][0]
+    initial = web.get(f"/api/v1/projects/{project['id']}/settings").json()
+
+    updated = web.patch(
+        f"/api/v1/projects/{project['id']}/settings",
+        json={
+            "revision": initial["revision"],
+            "patch": {
+                "max_rounds": 12,
+                "max_repairs_per_slice": 3,
+                "test_commands": ["python -m pytest -q", "python -m pytest -q"],
+            },
+        },
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["defaults"]["max_rounds"] == 12
+    assert updated.json()["defaults"]["max_repairs_per_slice"] == 3
+    assert updated.json()["defaults"]["test_commands"] == ["python -m pytest -q"]
+
+
+def test_project_settings_reject_unsafe_test_command(tmp_path, monkeypatch):
+    seed_project(tmp_path, monkeypatch, name="unsafe-settings")
+    web = client(tmp_path)
+    project = web.get("/api/v1/projects").json()["projects"][0]
+
+    response = web.patch(
+        f"/api/v1/projects/{project['id']}/settings",
+        json={"patch": {"test_commands": ["pytest -q && echo unsafe"]}},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_test_command"
