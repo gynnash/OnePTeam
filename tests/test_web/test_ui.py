@@ -25,4 +25,4 @@ def test_index_fallback_without_dist(tmp_path, monkeypatch):
     response = client.get("/")
     assert response.status_code == 200
     assert "OnePTeam Web Console" in response.text
-    assert "/api/v1/projects" in response.text
+    assert "/api/v2/projects" in response.text

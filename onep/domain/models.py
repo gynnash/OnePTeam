@@ -19,16 +19,7 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
-class RunStatus(str, Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    PAUSED = "paused"
-    STOPPED = "stopped"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-@dataclass(frozen=True)
+@dataclass
 class Problem(Exception):
     """Stable, user-facing failure returned by every application entry point."""
 
@@ -85,18 +76,5 @@ class Job:
     lease_until: str = ""
     result: dict[str, Any] = field(default_factory=dict)
     error: dict[str, Any] = field(default_factory=dict)
-    created_at: str = ""
-    updated_at: str = ""
-
-
-@dataclass(frozen=True)
-class RunRecord:
-    id: str
-    project_id: str
-    goal_version: int
-    workflow: str
-    status: RunStatus = RunStatus.PENDING
-    stage: str = "init"
-    options: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""

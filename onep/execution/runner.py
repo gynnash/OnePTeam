@@ -6,7 +6,7 @@ import argparse
 import signal
 from threading import Event
 
-from onep.application.defaults import build_application
+from onep.application.studio_defaults import build_application
 from onep.execution.worker import Worker
 
 

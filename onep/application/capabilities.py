@@ -18,7 +18,6 @@ class Capability:
     handler: CapabilityHandler
     mutating: bool = False
     background: bool = False
-    legacy: bool = False
     input_schema: dict[str, Any] = field(default_factory=dict)
 
     def describe(self) -> dict[str, Any]:
@@ -27,7 +26,6 @@ class Capability:
             "title": self.title,
             "mutating": self.mutating,
             "background": self.background,
-            "legacy": self.legacy,
             "input_schema": self.input_schema,
         }
 
@@ -57,5 +55,4 @@ class CapabilityRegistry:
         return [
             capability.describe()
             for capability in sorted(self._items.values(), key=lambda item: item.id)
-            if not capability.legacy
         ]

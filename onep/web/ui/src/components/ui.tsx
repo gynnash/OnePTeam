@@ -1,4 +1,11 @@
-import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
+import {
+  createContext,
+  type ButtonHTMLAttributes,
+  type HTMLAttributes,
+  type ReactNode,
+  useContext,
+  useState,
+} from "react";
 import { Dialog, Tooltip } from "radix-ui";
 import { AlertTriangle, ChevronRight, RotateCw, X } from "lucide-react";
 import { useRouteError } from "react-router";
@@ -53,7 +60,11 @@ export function Empty({
 }) {
   return (
     <div className="empty-state">
-      <div className="empty-icon">{icon}</div>
+      <div className="empty-orbit" aria-hidden="true">
+        <i />
+        <i />
+        <div className="empty-icon">{icon}</div>
+      </div>
       <b>{title}</b>
       {detail && <p>{detail}</p>}
       {action}
@@ -146,6 +157,18 @@ export function JsonInspector({
   value: unknown;
   label?: string;
 }) {
+  const openDiagnostic = useContext(DiagnosticContext);
+  if (openDiagnostic)
+    return (
+      <button
+        type="button"
+        className="raw-data-trigger"
+        onClick={() => openDiagnostic({ label, value })}
+      >
+        <ChevronRight size={13} />
+        {label}
+      </button>
+    );
   return (
     <details className="raw-data">
       <summary>
@@ -154,6 +177,32 @@ export function JsonInspector({
       </summary>
       <pre>{JSON.stringify(value, null, 2)}</pre>
     </details>
+  );
+}
+
+type DiagnosticPayload = { label: string; value: unknown };
+const DiagnosticContext = createContext<
+  ((payload: DiagnosticPayload) => void) | null
+>(null);
+
+export function DiagnosticsProvider({ children }: { children: ReactNode }) {
+  const [diagnostic, setDiagnostic] = useState<DiagnosticPayload | null>(null);
+  return (
+    <DiagnosticContext.Provider value={setDiagnostic}>
+      {children}
+      <Modal
+        open={!!diagnostic}
+        onOpenChange={(open) => !open && setDiagnostic(null)}
+        title={diagnostic?.label || "技术详情"}
+        detail="完整运行证据仅在需要诊断时展示。"
+        side
+        wide
+      >
+        <pre className="diagnostic-code">
+          {JSON.stringify(diagnostic?.value, null, 2)}
+        </pre>
+      </Modal>
+    </DiagnosticContext.Provider>
   );
 }
 

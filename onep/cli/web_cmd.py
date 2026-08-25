@@ -13,8 +13,8 @@ import sys
               help="Port (default: config.yaml web.port, else 8311)")
 def web_cmd(host: str | None, port: int | None):
     """Run the local web console (no authentication; binds 127.0.0.1 by default)."""
-    from onep.application.defaults import control_store_path
-    from onep.web.runtime import web_config
+    from onep.application.studio_defaults import control_store_path
+    from onep.web.studio_runtime import web_config
     from onep.web.server import run_server
 
     resolved_host = host or web_config()[0]

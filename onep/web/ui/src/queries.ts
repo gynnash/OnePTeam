@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, api } from "./api";
+import { Activity, api, studioApi } from "./api";
 
 const readCapabilities = new Set([
   "capability.list",
@@ -140,4 +140,67 @@ export function useLiveEvents() {
     };
   }, [client]);
   return connection;
+}
+
+export const studioKeys = {
+  health: ["studio", "health"] as const,
+  projects: ["studio", "projects"] as const,
+  project: (id: string) => ["studio", "project", id] as const,
+  knowledge: (query: string) => ["studio", "knowledge", query] as const,
+  articles: ["studio", "articles"] as const,
+  article: (id: string) => ["studio", "article", id] as const,
+  models: ["studio", "article-models"] as const,
+  jobs: ["studio", "jobs"] as const,
+};
+
+export function useStudioHealth() {
+  return useQuery({
+    queryKey: studioKeys.health,
+    queryFn: studioApi.health,
+    refetchInterval: 10_000,
+  });
+}
+
+export function useStudioProjects() {
+  return useQuery({ queryKey: studioKeys.projects, queryFn: studioApi.projects });
+}
+
+export function useStudioProject(id: string) {
+  return useQuery({
+    queryKey: studioKeys.project(id),
+    queryFn: () => studioApi.studio(id),
+    enabled: Boolean(id),
+    refetchInterval: 3_000,
+  });
+}
+
+export function useStudioKnowledge(query: string) {
+  return useQuery({
+    queryKey: studioKeys.knowledge(query),
+    queryFn: () => studioApi.knowledge(query),
+  });
+}
+
+export function useArticles() {
+  return useQuery({ queryKey: studioKeys.articles, queryFn: studioApi.articles });
+}
+
+export function useArticle(id: string) {
+  return useQuery({
+    queryKey: studioKeys.article(id),
+    queryFn: () => studioApi.article(id),
+    enabled: Boolean(id),
+  });
+}
+
+export function useArticleModels() {
+  return useQuery({ queryKey: studioKeys.models, queryFn: studioApi.articleModels });
+}
+
+export function useStudioJobs() {
+  return useQuery({
+    queryKey: studioKeys.jobs,
+    queryFn: studioApi.jobs,
+    refetchInterval: 2_000,
+  });
 }

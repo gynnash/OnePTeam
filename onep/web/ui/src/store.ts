@@ -3,18 +3,25 @@ import { persist } from "zustand/middleware";
 
 export type Theme = "system" | "light" | "dark";
 export type Density = "comfortable" | "compact";
+export type ComposerDraft = {
+  goal?: string;
+  source?: string;
+  branch?: string;
+};
 
 type UIState = {
   theme: Theme;
   density: Density;
-  sidebarCollapsed: boolean;
+  developerMode: boolean;
   inspectorOpen: boolean;
   composerOpen: boolean;
+  composerDraft: ComposerDraft;
   setTheme: (theme: Theme) => void;
   setDensity: (density: Density) => void;
-  toggleSidebar: () => void;
+  setDeveloperMode: (enabled: boolean) => void;
   setInspectorOpen: (open: boolean) => void;
   setComposerOpen: (open: boolean) => void;
+  openComposer: (draft?: ComposerDraft) => void;
 };
 
 export function applyTheme(theme: Theme) {
@@ -29,9 +36,10 @@ export const useUIStore = create<UIState>()(
     (set) => ({
       theme: "system",
       density: "comfortable",
-      sidebarCollapsed: false,
+      developerMode: false,
       inspectorOpen: true,
       composerOpen: false,
+      composerDraft: {},
       setTheme: (theme) => {
         applyTheme(theme);
         set({ theme });
@@ -40,20 +48,30 @@ export const useUIStore = create<UIState>()(
         document.documentElement.dataset.density = density;
         set({ density });
       },
-      toggleSidebar: () =>
-        set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+      setDeveloperMode: (developerMode) => set({ developerMode }),
       setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
       setComposerOpen: (composerOpen) => set({ composerOpen }),
+      openComposer: (composerDraft = {}) =>
+        set({ composerOpen: true, composerDraft }),
     }),
     {
       name: "onep-ui",
-      version: 1,
-      partialize: ({ theme, density, sidebarCollapsed, inspectorOpen }) => ({
+      version: 3,
+      partialize: ({ theme, density, developerMode, inspectorOpen }) => ({
         theme,
         density,
-        sidebarCollapsed,
+        developerMode,
         inspectorOpen,
       }),
+      migrate: (persisted) => {
+        const previous = persisted as Partial<UIState>;
+        return {
+          theme: previous.theme || "system",
+          density: previous.density || "comfortable",
+          developerMode: previous.developerMode ?? false,
+          inspectorOpen: previous.inspectorOpen ?? true,
+        };
+      },
       onRehydrateStorage: () => (state) => {
         if (state) {
           applyTheme(state.theme);

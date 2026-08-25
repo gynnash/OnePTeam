@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "react-router";
 import { Toaster } from "sonner";
-import "@fontsource-variable/inter";
+import "@fontsource-variable/geist";
 import "@fontsource-variable/jetbrains-mono";
 import { router } from "./router";
 import { applyTheme, useUIStore } from "./store";

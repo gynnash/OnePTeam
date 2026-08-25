@@ -5,22 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "onep"
 version = "0.1.0"
-description = "Multi-Agent Full-Stack Software Development Team"
+description = "AI product definition, Codex delivery, and engineering knowledge platform"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.1",
-    "rich>=13.0",
-    "crewai>=0.80",
-    "langgraph>=0.2",
-    "langchain>=0.3",
-    "gitpython>=3.1",
     "pyyaml>=6.0",
-    "docker>=7.0",
     "litellm>=1.50",
     "python-dotenv>=1.0",
     # Web console (P4). Already present transitively via litellm's proxy extra; now a first-class dependency.
     "fastapi>=0.110",
     "uvicorn>=0.27",
+    "keyring>=25.0",
 ]
 
 [project.scripts]
@@ -28,9 +23,27 @@ onep = "onep.main:cli"
 
 [tool.setuptools.package-data]
 "onep.web" = ["ui/dist/index.html", "ui/dist/assets/*"]
+"onep.runtime" = ["*.md"]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "pytest-mock>=3.12",
+]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests/test_application/test_capabilities.py",
+    "tests/test_application/test_service.py",
+    "tests/test_application/test_settings.py",
+    "tests/test_cli/test_web_cmd.py",
+    "tests/test_config.py",
+    "tests/test_delivery/test_fingerprint.py",
+    "tests/test_execution/test_worker.py",
+    "tests/test_infrastructure/test_control_store.py",
+    "tests/test_runtime/test_app_server.py",
+    "tests/test_runtime/test_app_server_client.py",
+    "tests/test_studio",
+    "tests/test_web/test_server.py",
+    "tests/test_web/test_ui.py",
 ]

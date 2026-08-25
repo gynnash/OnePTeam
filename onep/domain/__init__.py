@@ -5,8 +5,6 @@ from onep.domain.models import (
     Job,
     JobStatus,
     Problem,
-    RunRecord,
-    RunStatus,
 )
 
 __all__ = [
@@ -14,6 +12,4 @@ __all__ = [
     "Job",
     "JobStatus",
     "Problem",
-    "RunRecord",
-    "RunStatus",
 ]

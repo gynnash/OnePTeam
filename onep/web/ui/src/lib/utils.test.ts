@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { shortTime, stageLabel, statusLabel, summarize } from "./utils";
+import {
+  projectHue,
+  shortTime,
+  stageLabel,
+  statusLabel,
+  summarize,
+} from "./utils";
 
 describe("human-facing formatters", () => {
   it("translates durable states and stages", () => {
@@ -10,5 +16,11 @@ describe("human-facing formatters", () => {
   it("summarizes raw evidence without losing the original object", () => {
     expect(summarize({ detail: "x".repeat(30) }, 20)).toHaveLength(20);
     expect(shortTime("not-a-date")).toBe("not-a-date");
+  });
+
+  it("gives project covers a stable hue inside the brand range", () => {
+    expect(projectHue("OnePTeam")).toBe(projectHue("OnePTeam"));
+    expect(projectHue("OnePTeam")).toBeGreaterThanOrEqual(248);
+    expect(projectHue("OnePTeam")).toBeLessThan(300);
   });
 });

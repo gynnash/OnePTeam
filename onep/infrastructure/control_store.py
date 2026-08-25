@@ -13,7 +13,7 @@ import sqlite3
 from typing import Any
 from uuid import uuid4
 
-from onep.domain import Job, JobStatus, Problem, RunRecord, RunStatus
+from onep.domain import Job, JobStatus, Problem
 
 
 def _now() -> str:
@@ -37,17 +37,6 @@ class ControlStore:
         with self._connect() as connection:
             connection.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS v2_runs (
-                    id TEXT PRIMARY KEY,
-                    project_id TEXT NOT NULL,
-                    goal_version INTEGER NOT NULL,
-                    workflow TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    stage TEXT NOT NULL,
-                    options_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
                 CREATE TABLE IF NOT EXISTS v2_jobs (
                     id TEXT PRIMARY KEY,
                     capability_id TEXT NOT NULL,
@@ -452,85 +441,6 @@ class ControlStore:
             "worker_id": row["id"] if row else "",
             "last_seen": row["last_seen"] if row else "",
         }
-
-    def create_run(self, run: RunRecord) -> RunRecord:
-        now = _now()
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO v2_runs (
-                    id, project_id, goal_version, workflow, status, stage,
-                    options_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run.id,
-                    run.project_id,
-                    run.goal_version,
-                    run.workflow,
-                    run.status.value,
-                    run.stage,
-                    json.dumps(run.options, ensure_ascii=False),
-                    run.created_at or now,
-                    run.updated_at or now,
-                ),
-            )
-        return self.get_run(run.id)
-
-    def get_run(self, run_id: str) -> RunRecord | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM v2_runs WHERE id = ?", (run_id,)
-            ).fetchone()
-        if row is None:
-            return None
-        return RunRecord(
-            id=row["id"],
-            project_id=row["project_id"],
-            goal_version=row["goal_version"],
-            workflow=row["workflow"],
-            status=RunStatus(row["status"]),
-            stage=row["stage"],
-            options=json.loads(row["options_json"]),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
-
-    def latest_run_for_project(self, project_id: str) -> RunRecord | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT id FROM v2_runs
-                WHERE project_id = ? ORDER BY created_at DESC LIMIT 1
-                """,
-                (project_id,),
-            ).fetchone()
-        return self.get_run(row["id"]) if row is not None else None
-
-    def update_run(
-        self,
-        run_id: str,
-        *,
-        status: RunStatus | None = None,
-        stage: str | None = None,
-    ) -> RunRecord:
-        assignments = ["updated_at = ?"]
-        values: list[Any] = [_now()]
-        if status is not None:
-            assignments.append("status = ?")
-            values.append(status.value)
-        if stage is not None:
-            assignments.append("stage = ?")
-            values.append(stage)
-        values.append(run_id)
-        with self._connect() as connection:
-            cursor = connection.execute(
-                f"UPDATE v2_runs SET {', '.join(assignments)} WHERE id = ?",
-                values,
-            )
-        if cursor.rowcount != 1:
-            raise Problem("run_not_found", "Run not found", run_id)
-        return self.get_run(run_id)
 
     @staticmethod
     def _recover_expired(

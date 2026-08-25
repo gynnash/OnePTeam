@@ -8,14 +8,16 @@ def noop(payload, context):
     return payload
 
 
-def test_registry_describes_non_legacy_capabilities():
+def test_registry_describes_registered_capabilities():
     registry = CapabilityRegistry([
         Capability("project.list", "List projects", noop),
-        Capability("legacy.run", "Legacy", noop, legacy=True),
+        Capability("studio.execute", "Execute approved Release", noop),
     ])
 
     assert registry.get("project.list").title == "List projects"
-    assert [item["id"] for item in registry.describe()] == ["project.list"]
+    assert [item["id"] for item in registry.describe()] == [
+        "project.list", "studio.execute"
+    ]
 
 
 def test_registry_rejects_duplicates_and_unknown_ids():

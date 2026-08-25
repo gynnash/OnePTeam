@@ -1,13 +1,12 @@
 from unittest import mock
 
-import pytest
 import yaml
 
 from onep.config import (
     Config,
+    ExecutionConfig,
     LLMConfig,
     ProjectConfig,
-    PipelineConfig,
     load_config,
     save_config,
 )
@@ -22,8 +21,8 @@ def test_llm_config_defaults():
 def test_config_default_values():
     cfg = Config()
     assert cfg.llm.default_model == "deepseek/deepseek-chat"
-    assert cfg.pipeline.max_retries == 3
-    assert cfg.pipeline.auto_approve is False
+    assert cfg.execution.codex_model == "gpt-5.6-terra"
+    assert cfg.execution.codex_approval_policy == "on-request"
 
 
 def test_load_config_creates_default(tmp_path):
@@ -44,17 +43,16 @@ def test_load_config_reads_existing(tmp_path):
     with mock.patch("onep.config._config_dir", return_value=tmp_path):
         config = load_config()
     assert config.llm.default_model == "openai/gpt-4o"
-    assert config.pipeline.max_retries == 5
+    assert not hasattr(config, "pipeline")
 
 
 def test_save_config_persists(tmp_path):
     with mock.patch("onep.config._config_dir", return_value=tmp_path):
         config = Config()
-        config.pipeline.max_retries = 10
         save_config(config)
 
     reloaded = yaml.safe_load((tmp_path / "config.yaml").read_text())
-    assert reloaded["pipeline"]["max_retries"] == 10
+    assert set(reloaded) == {"execution", "llm", "project"}
 
 
 def test_save_load_round_trip(tmp_path):
@@ -73,10 +71,10 @@ def test_save_load_round_trip(tmp_path):
                 },
             ),
             project=ProjectConfig(root_dir="/tmp/test-project"),
-            pipeline=PipelineConfig(
-                auto_approve=True,
-                max_retries=7,
-                test_timeout=600,
+            execution=ExecutionConfig(
+                codex_model="gpt-test",
+                codex_auth_mode="existing",
+                codex_approval_policy="on-request",
             ),
         )
         save_config(original)
@@ -88,6 +86,4 @@ def test_save_load_round_trip(tmp_path):
     assert reloaded.llm.complex_provider == original.llm.complex_provider
     assert reloaded.llm.models == original.llm.models
     assert reloaded.project.root_dir == original.project.root_dir
-    assert reloaded.pipeline.auto_approve == original.pipeline.auto_approve
-    assert reloaded.pipeline.max_retries == original.pipeline.max_retries
-    assert reloaded.pipeline.test_timeout == original.pipeline.test_timeout
+    assert reloaded.execution == original.execution

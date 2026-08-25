@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import sqlite3
 
-from onep.domain import JobStatus, RunRecord, RunStatus
+from onep.domain import JobStatus
 from onep.infrastructure import ControlStore
 
 
@@ -63,21 +63,7 @@ def test_expired_lease_returns_job_to_queue(tmp_path):
     assert recovered.lease_owner == "new-worker"
 
 
-def test_cancel_and_run_crud(tmp_path):
+def test_cancel_queued_job(tmp_path):
     store = ControlStore(tmp_path / "control.db")
     queued = enqueue(store, "queued")
     assert store.request_cancel(queued.id).status == JobStatus.CANCELLED
-
-    run = store.create_run(RunRecord(
-        id="r1",
-        project_id="p1",
-        goal_version=1,
-        workflow="mixed",
-        options={"max_rounds": 10},
-    ))
-    assert run.status == RunStatus.PENDING
-    updated = store.update_run("r1", status=RunStatus.RUNNING, stage="understand")
-    assert updated.status == RunStatus.RUNNING
-    assert updated.stage == "understand"
-    assert store.latest_run_for_project("p1").id == "r1"
-    assert store.latest_run_for_project("missing") is None

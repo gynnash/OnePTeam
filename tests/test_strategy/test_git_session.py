@@ -112,13 +112,27 @@ def test_cherry_pick_conflict_abort_restores_integration_head(tmp_path):
     assert (run.integration_worktree / "app.py").read_text() == "first\n"
 
 
-def test_dirty_source_repository_is_rejected(tmp_path):
+def test_dirty_source_repository_is_snapshotted_without_mutating_checkout(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
-    _repo(source)
-    (source / "notes.txt").write_text("dirty")
-    with pytest.raises(ValueError, match="dirty"):
-        GitRunSession(source, tmp_path / "run", "dirty")
+    repo = _repo(source)
+    original_head = repo.head.commit.hexsha
+    (source / "app.py").write_text("value = 2\n")
+    (source / "staged.py").write_text("staged = True\n")
+    repo.index.add(["staged.py"])
+    (source / "notes.txt").write_text("untracked\n")
+    original_status = repo.git.status("--porcelain")
+
+    run = GitRunSession(source, tmp_path / "run", "dirty")
+    run.create_integration_branch()
+
+    assert run.source_snapshot_commit
+    assert run.base_commit != original_head
+    assert (run.integration_worktree / "app.py").read_text() == "value = 2\n"
+    assert (run.integration_worktree / "staged.py").read_text() == "staged = True\n"
+    assert (run.integration_worktree / "notes.txt").read_text() == "untracked\n"
+    assert repo.head.commit.hexsha == original_head
+    assert repo.git.status("--porcelain") == original_status
 
 
 def test_plan_group_uses_one_integration_baseline(tmp_path):
@@ -149,3 +163,29 @@ def test_commit_excludes_baseline_untracked_files(tmp_path):
     commit = plan.commit("change")
     tree = git.Repo(plan.worktree).commit(commit).tree
     assert "keep.txt" not in [item.path for item in tree.traverse()]
+
+
+def test_run_can_use_a_non_checked_out_branch_as_its_base(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    repo = _repo(source)
+    original_branch = repo.active_branch.name
+    feature = repo.create_head("feature")
+    feature.checkout()
+    (source / "app.py").write_text("value = 2\n")
+    repo.index.add(["app.py"])
+    feature_commit = repo.index.commit("feature change").hexsha
+    repo.heads[original_branch].checkout()
+
+    run = GitRunSession(
+        source,
+        tmp_path / "run",
+        "target-branch",
+        base_branch="feature",
+    )
+    run.create_integration_branch()
+
+    assert run.base_branch == "feature"
+    assert run.base_commit == feature_commit
+    assert (run.integration_worktree / "app.py").read_text() == "value = 2\n"
+    assert repo.active_branch.name == original_branch

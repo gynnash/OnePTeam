@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from onep.domain import Job, JobStatus
 from onep.harness.models import (
     HarnessRun,
     HarnessOptions,
@@ -56,6 +57,40 @@ def test_project_summaries(tmp_path, monkeypatch):
     assert len(rows) == 1
     assert rows[0]["name"] == "demo"
     assert rows[0]["harness"]["project_name"] == "demo"
+
+
+def test_brownfield_summary_uses_owning_workflow_job_status(tmp_path):
+    project = Project(
+        id="project-1",
+        name="daily_stock_analysis",
+        mode=ProjectMode.BROWNFIELD,
+        workspace_path=str(tmp_path / "workspace"),
+        requirement="优化交互",
+        created_at="2026-08-23T03:56:29+00:00",
+        updated_at="2026-08-23T03:56:29+00:00",
+    )
+    job = Job(
+        id="job-1",
+        capability_id="optimization.start",
+        payload={
+            "source": "/workspace/daily_stock_analysis",
+            "goal": "优化交互",
+        },
+        status=JobStatus.FAILED,
+        created_at="2026-08-23T03:56:27+00:00",
+        updated_at="2026-08-23T04:02:00+00:00",
+    )
+
+    row = project_summaries([project], jobs=[job])[0]
+
+    assert row["status"] == "failed"
+    assert row["current_stage"] == "failed"
+    assert row["updated_at"] == job.updated_at
+    assert row["workflow_job"] == {
+        "id": "job-1",
+        "capability_id": "optimization.start",
+        "status": "failed",
+    }
 
 
 def test_run_detail_shape(tmp_path, monkeypatch):

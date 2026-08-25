@@ -21,37 +21,49 @@ export const router = createHashRouter([
       {
         index: true,
         lazy: async () => ({
-          Component: (await import("./pages/dashboard")).DashboardPage,
+          Component: (await import("./pages/studio-dashboard")).StudioDashboardPage,
         }),
       },
       {
         path: "projects",
         lazy: async () => ({
-          Component: (await import("./pages/projects")).ProjectsPage,
+          Component: (await import("./pages/studio-projects")).StudioProjectsPage,
         }),
       },
       {
-        path: "tasks",
+        path: "runs",
         lazy: async () => ({
-          Component: (await import("./pages/tasks")).TasksPage,
+          Component: (await import("./pages/studio-runs")).StudioRunsPage,
         }),
       },
       {
         path: "knowledge",
         lazy: async () => ({
-          Component: (await import("./pages/knowledge")).KnowledgePage,
+          Component: (await import("./pages/studio-knowledge")).StudioKnowledgePage,
+        }),
+      },
+      {
+        path: "articles",
+        lazy: async () => ({
+          Component: (await import("./pages/articles")).ArticlesPage,
+        }),
+      },
+      {
+        path: "articles/:articleId",
+        lazy: async () => ({
+          Component: (await import("./pages/article-editor")).ArticleEditorPage,
         }),
       },
       {
         path: "settings",
         lazy: async () => ({
-          Component: (await import("./pages/settings")).GlobalSettingsPage,
+          Component: (await import("./pages/studio-settings")).StudioSettingsPage,
         }),
       },
       {
         path: "projects/:projectId/:section?",
         lazy: async () => ({
-          Component: (await import("./pages/project")).ProjectPage,
+          Component: (await import("./pages/studio-project")).StudioProjectPage,
         }),
       },
       { path: "*", element: <Navigate to="/" replace /> },

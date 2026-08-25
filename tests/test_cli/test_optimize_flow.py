@@ -46,6 +46,9 @@ def test_optimize_records_typed_flow_order(tmp_path, monkeypatch):
         "discover", "plan", "schedule", "develop", "integrate", "verify",
         "finished",
     ]
+    assert "进度 · 正在建立代码库索引" in result.output
+    assert "进度 · 第 1 轮：正在扫描并理解代码" in result.output
+    assert "进度 · 优化完成：1 个方案已集成" in result.output
 
 
 def test_optimize_forwards_user_goal_to_analysis(tmp_path, monkeypatch):

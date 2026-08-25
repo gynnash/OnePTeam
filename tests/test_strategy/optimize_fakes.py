@@ -13,13 +13,13 @@ class FakeLLM:
 class FakeGitSession:
     instances = []
 
-    def __init__(self, source, run_dir, run_id):
+    def __init__(self, source, run_dir, run_id, base_branch=None):
         self.source = Path(source)
         self.run_dir = Path(run_dir)
         self.integration_worktree = self.source / "integration-view"
         self.integration_worktree.mkdir(exist_ok=True)
         self.base_commit = "base"
-        self.base_branch = "main"
+        self.base_branch = base_branch or "main"
         self.integration_commit = "integrated"
         self.instances.append(self)
 
@@ -140,6 +140,7 @@ def install_fake_optimize_services(monkeypatch, tmp_path):
     monkeypatch.setattr("onep.cli.optimize_cmd.load_config", lambda: config)
     monkeypatch.setattr("onep.cli.optimize_cmd.init_db", lambda: None)
     monkeypatch.setattr("onep.cli.optimize_cmd.insert_project", lambda project: None)
+    monkeypatch.setattr("onep.cli.optimize_cmd.update_project", lambda project: None)
     monkeypatch.setattr("onep.cli.optimize_cmd.LLMAdapter", FakeLLM)
     monkeypatch.setattr("onep.cli.optimize_cmd.GitRunSession", FakeGitSession)
     monkeypatch.setattr("onep.cli.optimize_cmd.OptimizeRunRecorder", FakeRecorder)

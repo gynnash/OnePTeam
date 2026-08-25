@@ -42,34 +42,24 @@ class ProjectConfig:
 
 
 @dataclass
-class PipelineConfig:
-    auto_approve: bool = False
-    max_retries: int = 3
-    test_timeout: int = 300
-    stage_output_tokens: dict[str, int] = field(default_factory=lambda: {
-        "analyzer": 2048,
-        "strategy_architect": 8192,
-        "optimize_developer": 8192,
-        "code_reviewer": 4096,
-    })
+class ExecutionConfig:
+    """The only engineering backend: local Codex App Server over stdio."""
 
-
-@dataclass
-class RunDefaultsConfig:
-    max_rounds: int = 100
-    max_repairs_per_slice: int = 8
-    max_cost: float = 0.0
-    deploy_mode: str = "verify"
-    non_interactive: bool = False
-    verbose: bool = False
+    codex_model: str = "gpt-5.6-terra"
+    codex_provider: str = ""
+    codex_auth_mode: str = "existing"
+    codex_api_key_env: str = "OPENAI_API_KEY"
+    codex_bin: str = "codex"
+    codex_approval_policy: str = "on-request"
+    codex_request_timeout_seconds: int = 30
+    codex_app_server_timeout_seconds: int = 3600
 
 
 @dataclass
 class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     project: ProjectConfig = field(default_factory=ProjectConfig)
-    pipeline: PipelineConfig = field(default_factory=PipelineConfig)
-    run_defaults: RunDefaultsConfig = field(default_factory=RunDefaultsConfig)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
 
 
 def _default_config_yaml() -> str:
@@ -104,13 +94,16 @@ def load_config() -> Config:
     raw = yaml.safe_load(_config_path().read_text()) or {}
     llm = LLMConfig(**(raw.get("llm") or {}))
     project = ProjectConfig(**(raw.get("project") or {}))
-    pipeline = PipelineConfig(**(raw.get("pipeline") or {}))
-    run_defaults = RunDefaultsConfig(**(raw.get("run_defaults") or {}))
+    execution_raw = raw.get("execution") or {}
+    execution_fields = {value.name for value in dataclasses.fields(ExecutionConfig)}
+    execution = ExecutionConfig(**{
+        key: value for key, value in execution_raw.items()
+        if key in execution_fields
+    })
     return Config(
         llm=llm,
         project=project,
-        pipeline=pipeline,
-        run_defaults=run_defaults,
+        execution=execution,
     )
 
 
@@ -129,13 +122,7 @@ def save_config(config: Config) -> None:
             "pricing": config.llm.pricing,
         },
         "project": {"root_dir": config.project.root_dir},
-        "pipeline": {
-            "auto_approve": config.pipeline.auto_approve,
-            "max_retries": config.pipeline.max_retries,
-            "test_timeout": config.pipeline.test_timeout,
-            "stage_output_tokens": config.pipeline.stage_output_tokens,
-        },
-        "run_defaults": dataclasses.asdict(config.run_defaults),
+        "execution": dataclasses.asdict(config.execution),
     })
     _atomic_write(config_file, yaml.dump(raw, default_flow_style=False))
 

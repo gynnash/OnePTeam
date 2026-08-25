@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import git
 
 from onep.application.defaults import build_application
 from onep.web.server import create_app
@@ -35,6 +36,47 @@ def test_health_reports_worker_readiness(tmp_path):
     assert degraded.json()["status"] == "degraded"
     assert ready.json()["status"] == "ready"
     assert ready.json()["worker"]["worker_id"] == "worker-web"
+
+
+def test_directory_picker_returns_visual_selection_and_current_branch(
+    tmp_path, monkeypatch
+):
+    repository_path = tmp_path / "picked-repository"
+    repository_path.mkdir()
+    repository = git.Repo.init(repository_path, initial_branch="feature/home")
+    with repository.config_writer() as config:
+        config.set_value("user", "name", "OneP Test")
+        config.set_value("user", "email", "onep@example.com")
+    (repository_path / "app.py").write_text("ready = True\n")
+    repository.index.add(["app.py"])
+    repository.index.commit("initial")
+    monkeypatch.setattr(
+        "onep.web.api_v1.pick_local_directory",
+        lambda _initial: repository_path,
+    )
+
+    response = client(tmp_path).post(
+        "/api/v1/system/pick-directory",
+        json={"initial_path": str(tmp_path)},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "path": str(repository_path),
+        "branch": "feature/home",
+        "cancelled": False,
+    }
+
+
+def test_directory_picker_preserves_form_when_user_cancels(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "onep.web.api_v1.pick_local_directory", lambda _initial: None
+    )
+
+    response = client(tmp_path).post("/api/v1/system/pick-directory", json={})
+
+    assert response.status_code == 200
+    assert response.json() == {"path": "", "branch": "", "cancelled": True}
 
 
 def test_background_action_is_idempotent_and_job_reports_result(tmp_path):
@@ -128,3 +170,82 @@ def test_project_settings_reject_unsafe_test_command(tmp_path, monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["code"] == "invalid_test_command"
+
+
+def test_unified_task_routes_from_goal_and_repository_contents(tmp_path):
+    repository = tmp_path / "target-repository"
+    repository.mkdir()
+    (repository / "service.py").write_text("def ready(): return True\n")
+
+    response = client(tmp_path).post(
+        "/api/v1/tasks",
+        json={
+            "goal": "分析服务的模块边界，不修改代码",
+            "source": str(repository),
+            "branch": "main",
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["workflow"] == "analyze"
+    assert response.json()["repository"]["source"] == str(repository)
+    assert response.json()["repository"]["branch"] == "main"
+    job = client(tmp_path).get(f"/api/v1/jobs/{response.json()['job_id']}").json()
+    assert job["capability_id"] == "analysis.start"
+
+
+def test_unified_task_requires_local_repository_for_mutation(tmp_path):
+    response = client(tmp_path).post(
+        "/api/v1/tasks",
+        json={
+            "goal": "优化缓存性能",
+            "source": "https://example.com/team/repository.git",
+            "branch": "main",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "local_repository_required"
+
+
+def test_unified_task_requires_git_before_modifying_existing_local_code(tmp_path):
+    repository = tmp_path / "plain-directory"
+    repository.mkdir()
+    (repository / "service.py").write_text("def ready(): return True\n")
+
+    response = client(tmp_path).post(
+        "/api/v1/tasks",
+        json={
+            "goal": "优化缓存性能",
+            "source": str(repository),
+            "branch": "main",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "git_repository_required"
+
+
+def test_unified_optimization_accepts_dirty_repository(tmp_path):
+    repository = tmp_path / "dirty-repository"
+    repository.mkdir()
+    repo = git.Repo.init(repository, initial_branch="main")
+    (repository / "service.py").write_text("def ready(): return True\n")
+    repo.index.add(["service.py"])
+    repo.index.commit("initial")
+    (repository / "notes.txt").write_text("not committed\n")
+    web = client(tmp_path)
+
+    response = web.post(
+        "/api/v1/tasks",
+        json={
+            "goal": "优化缓存性能",
+            "source": str(repository),
+            "branch": "main",
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["workflow"] == "optimize"
+    job = web.get(f"/api/v1/jobs/{response.json()['job_id']}").json()
+    assert job["capability_id"] == "optimization.start"
